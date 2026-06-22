@@ -27,6 +27,9 @@ htmlcov/
 # Docker
 docker-compose.override.yml
 
+# IDE / tool config
+.claude/settings.local.json
+
 # OS generated files
 .DS_Store
 Thumbs.db

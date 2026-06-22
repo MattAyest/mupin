@@ -1,6 +1,8 @@
 import os
 import ast
 import re
+import json
+import socket
 import subprocess
 from typing import TypedDict, List, Dict, Any
 
@@ -18,7 +20,7 @@ except ImportError:
 
 # Initialize LLMs (Requires GOOGLE_API_KEY environment variable)
 llm_fast = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0) # Fast model
-llm_heavy = ChatGoogleGenerativeAI(model="gemini-3.1-pro", temperature=0) # Heavy model
+llm_heavy = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0) # Heavy model
 
 class SwarmState(TypedDict):
     messages: List[Any]
@@ -31,6 +33,33 @@ class SwarmState(TypedDict):
     rollback_graveyard: List[str]
     architectural_plan: str
     architecture_ledger: str
+
+# ---------------------------------------------------------
+# HELPER: Resolve host-side path for a container-internal path.
+# Docker sets the container hostname to the container ID, so we can
+# inspect our own mounts via the socket to find the host path.
+# ---------------------------------------------------------
+def resolve_host_path(container_path: str) -> str:
+    abs_path = os.path.abspath(container_path)
+    try:
+        container_id = socket.gethostname()
+        result = subprocess.run(
+            ["docker", "inspect", container_id, "--format", "{{json .Mounts}}"],
+            capture_output=True, text=True, timeout=5
+        )
+        mounts = json.loads(result.stdout)
+        # Find the mount whose Destination is the longest prefix of our path
+        best = None
+        for mount in mounts:
+            dest = mount.get("Destination", "")
+            if abs_path.startswith(dest) and (best is None or len(dest) > len(best["Destination"])):
+                best = mount
+        if best:
+            relative = abs_path[len(best["Destination"]):]
+            return best["Source"] + relative
+    except Exception:
+        pass
+    return abs_path
 
 # ---------------------------------------------------------
 # NODE: WORKSPACE LOADER
@@ -105,7 +134,13 @@ def cloud_synthesizer(state: SwarmState):
     system = (
         "You are a master Python programmer. Output your code wrapped in XML tags like this:\n"
         "<file name=\"main.py\">\nprint('hello')\n</file>\n"
-        "Always include comprehensive pytest files starting with test_."
+        "RULES:\n"
+        "1. All source files go in a src/ subdirectory. Always include a src/__init__.py.\n"
+        "2. ALL test files must be placed under a tests/ subdirectory and named test_*.py.\n"
+        "3. Always include a tests/__init__.py file.\n"
+        "4. Do not place any source or test files in the root directory.\n"
+        "5. In test files, import from src (e.g. from src.module import thing).\n"
+        "6. Output raw Python code inside the XML tags — no markdown fences."
     )
     
     if plan:
@@ -123,7 +158,9 @@ def cloud_synthesizer(state: SwarmState):
         new_files = {}
         matches = re.finditer(r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>', content, re.DOTALL | re.IGNORECASE)
         for match in matches:
-            new_files[match.group(1).strip()] = match.group(2).strip()
+            code = match.group(2).strip()
+            code = re.sub(r'^```[a-zA-Z]*\n?', '', code).rstrip('`').strip()
+            new_files[match.group(1).strip()] = code
             
         if not new_files:
             raise ValueError("Failed XML formatting.")
@@ -159,6 +196,10 @@ def deterministic_verifier(state: SwarmState):
     manifest = state.get("file_manifest", {})
     loops = state.get("loop_count", 0) + 1
     
+    pytest_ini = "[pytest]\ntestpaths = tests\npythonpath = .\n"
+    with open(os.path.join(workspace, "pytest.ini"), "w") as f:
+        f.write(pytest_ini)
+
     for filename, code in manifest.items():
         filepath = os.path.join(workspace, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -170,10 +211,10 @@ def deterministic_verifier(state: SwarmState):
         "--memory", "512m", "--cpus", "1.0",
         "-e", "PIP_ROOT_USER_ACTION=ignore",
         "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
-        "-v", f"{os.path.abspath(workspace)}:/workspace",
+        "-v", f"{resolve_host_path(workspace)}:/workspace",
         "-w", "/workspace",
         "python:3.11-slim",
-        "bash", "-c", "if [ -f requirements.txt ]; then pip install -q -r requirements.txt 2>/dev/null; else pip install -q hypothesis pytest 2>/dev/null; fi && pytest test_*.py"
+        "bash", "-c", "if [ -f requirements.txt ]; then pip install -q -r requirements.txt 2>/dev/null; else pip install -q hypothesis pytest 2>/dev/null; fi && pytest"
     ]
     
     try:
