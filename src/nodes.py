@@ -5,20 +5,54 @@ import json
 import socket
 import shutil
 import subprocess
+import yaml
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+# from langchain_community.chat_models import ChatOllama # Uncomment if using Ollama
 
 from .state import SwarmState
 
-llm_fast = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
-llm_heavy = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
+# Load configuration
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'llm_config.yaml')
+with open(CONFIG_PATH, 'r') as f:
+    CONFIG = yaml.safe_load(f)
 
-LOOP_CEILING = 10
-REGRESSION_CEILING = 4
-REPLAN_CEILING = 3
+# Factory function to create LLM instances based on config
+def create_llm(node_name):
+    node_config = CONFIG['nodes'][node_name]
+    provider = node_config['provider']
+    model = node_config['model']
+    temperature = node_config.get('temperature', 0)
+    api_key_env_var = node_config.get('api_key_env_var')
 
+    api_key = os.getenv(api_key_env_var) if api_key_env_var else None
 
+    if provider == "google-genai":
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature, google_api_key=api_key)
+    elif provider == "openai":
+        return ChatOpenAI(model=model, temperature=temperature, openai_api_key=api_key)
+    elif provider == "anthropic":
+        return ChatAnthropic(model=model, temperature=temperature, anthropic_api_key=api_key)
+    # elif provider == "ollama":
+    #     return ChatOllama(model=model, base_url=os.getenv(api_key_env_var, "http://localhost:11434"))
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
+
+# Create LLM instances for each node
+llm_architect = create_llm("architect_node")
+llm_test_writer = create_llm("test_writer")
+llm_contract_verifier = create_llm("contract_verifier")
+llm_code_writer = create_llm("code_writer")
+llm_error_distiller = create_llm("error_distiller")
+llm_archivist = create_llm("archivist_node")
+
+# Load loop limits
+LOOP_CEILING = CONFIG['loop_limits']['max_verification_loops']
+REGRESSION_CEILING = CONFIG['loop_limits']['max_regression_count']
+REPLAN_CEILING = CONFIG['loop_limits']['max_replan_count']
 # ---------------------------------------------------------
 # HELPER: Resolve host-side path for a container-internal path.
 # Docker sets the container hostname to the container ID, so we can
@@ -93,7 +127,7 @@ def architect_node(state: SwarmState):
         )
 
     try:
-        res = llm_heavy.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+        res = llm_architect.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
         content = res.content
 
         plan_match = re.search(r'<plan>(.*?)</plan>', content, re.DOTALL | re.IGNORECASE)
@@ -145,7 +179,7 @@ def test_writer(state: SwarmState):
         user_prompt += f"\n\nPrevious failures — revise tests to match the contract:\n{errors}"
 
     try:
-        response = llm_heavy.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+        response = llm_test_writer.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
         content = response.content if hasattr(response, 'content') else ""
 
         test_files = {}
@@ -199,7 +233,7 @@ def contract_verifier(state: SwarmState):
     user_prompt = f"Contract:\n{contract}\n\nTest Suite:\n{test_context}"
 
     try:
-        res = llm_fast.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+        res = llm_contract_verifier.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
         verdict = res.content.strip()
     except Exception as e:
         # LLM call failed — surface the error but proceed rather than blocking the pipeline
@@ -270,7 +304,7 @@ def code_writer(state: SwarmState):
         user_prompt += "\n\nAVOID these failed approaches:\n" + "\n".join(graveyard[-2:])
 
     try:
-        response = llm_heavy.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+        response = llm_code_writer.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
         content = response.content if hasattr(response, 'content') else ""
 
         new_files = {}
@@ -464,7 +498,7 @@ def error_distiller(state: SwarmState):
         user_prompt = f"Contract:\n{contract}\n\nImplementation:\n{impl_context}"
 
         try:
-            res = llm_fast.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+            res = llm_error_distiller.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
             verdict = res.content.strip()
         except Exception as e:
             # Validator unavailable — proceed rather than block the pipeline
@@ -541,7 +575,7 @@ def error_distiller(state: SwarmState):
     user_prompt = f"Contract:\n{contract}\n\nFailure Trace:\n{raw_error}"
 
     try:
-        res = llm_fast.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
+        res = llm_error_distiller.invoke([SystemMessage(content=system), HumanMessage(content=user_prompt)])
         lines = res.content.strip().splitlines()
 
         fault_line = next((l for l in lines if l.upper().startswith("FAULT:")), "FAULT: implementation")
@@ -593,7 +627,7 @@ def archivist_node(state: SwarmState):
     prompt = f"Current Ledger:\n{ledger}\n\nPlan:\n{plan}\n\nContract:\n{contract}"
 
     try:
-        res = llm_fast.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
+        res = llm_archivist.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
         updated_ledger = (ledger + "\n\n" + res.content).strip()
         if workspace:
             with open(os.path.join(workspace, ".architecture.md"), "w") as f:
@@ -601,3 +635,6 @@ def archivist_node(state: SwarmState):
         return {"architecture_ledger": updated_ledger, "next_node": "FINISH"}
     except Exception:
         return {"next_node": "FINISH"}
+
+
+
