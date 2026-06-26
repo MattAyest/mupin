@@ -97,6 +97,7 @@ def _build_llm(node_name):
             temperature=temperature,
             base_url=OLLAMA_CLOUD_HOST,
             client_kwargs={"headers": {"Authorization": f"Bearer {key}"}},
+            request_timeout=300,
         )
 
     if provider == "ollama":
@@ -240,9 +241,9 @@ def workspace_loader(state: SwarmState):
 # ---------------------------------------------------------
 # NODE: ARCHITECT
 # Always runs. Produces two outputs stored separately in state:
-#   <plan>     — architectural decisions for the code writer
-#   <contract> — formal interface spec for the test writer (function sigs,
-#                behaviours, errors raised, edge cases that MUST be covered)
+#   <plan>     — architectural shape + quality properties for the code writer
+#   <contract> — precise behavioral spec for the test writer (signatures,
+#                returns, raise-rules, correctness guarantees)
 # On retry from error_distiller (fault=spec), receives prior context
 # and revises the contract.
 # ---------------------------------------------------------
@@ -252,18 +253,30 @@ def architect_node(state: SwarmState):
     existing_contract = state.get("interface_contract", "")
 
     system = (
-        "You are a software architect. Output your response in exactly two XML sections:\n\n"
+        "You are the systems architect in a TDD code-generation pipeline.\n"
+        "Think like a data engineer: you care about the shape of the data, how it flows,\n"
+        "and the contract at each boundary — not the tiny implementation details.\n"
+        "You define the what and the why; the code writer handles the how.\n\n"
+        "Your contract is the sole source of truth for the test writer, who never sees\n"
+        "the original task. The code writer reads both sections to build the implementation.\n\n"
+        "Output exactly two XML sections:\n\n"
         "<plan>\n"
-        "High-level design: module structure, algorithm choices, data flow.\n"
+        "The architectural shape that fits this problem: the kind of structure it needs\n"
+        "and any quality properties that matter for correctness or performance. Scale this\n"
+        "to the problem — a single sentence for a simple function, more depth for a system.\n"
         "</plan>\n\n"
         "<contract>\n"
-        "Formal interface specification. For every public function include:\n"
-        "- Signature with type hints\n"
-        "- Return type and value description\n"
-        "- Every exception that MUST be raised and under what condition\n"
-        "- Edge cases that tests MUST cover\n"
-        "Be precise — this contract is handed directly to a test writer "
-        "who will write tests BEFORE any code is written.\n"
+        "A precise behavioral specification. For every public function or method, define:\n"
+        "  - The exact signature with full type hints\n"
+        "  - What it returns and what that value represents\n"
+        "  - When it raises, stated as a rule rather than a list of cases\n"
+        "  - The guarantees that define correctness, shown with a few concrete\n"
+        "    input-to-output pairs at the meaningful boundaries\n\n"
+        "State conditions as rules. A rule covers every case at once; a list always\n"
+        "misses one and invites endless extension. Show the difference:\n\n"
+        '    As a rule:  "Raises TypeError unless n is an int."\n'
+        '    As a list:  "Raises TypeError for float, str, None, and similar."\n\n'
+        "The rule is complete and closed. The list is neither. Always prefer the rule.\n"
         "</contract>"
     )
 
@@ -299,7 +312,7 @@ def architect_node(state: SwarmState):
     thought = (
         f"Replanning — {feedback[:80]}"
         if is_replan
-        else f"Designed plan ({len(plan)} chars) and contract ({len(contract)} chars)"
+        else f"Designed plan ({len(plan)} chars), contract ({len(contract)} chars)"
     )
     _diag(ws, "architect_node", f"PLAN:\n{plan}\n\nCONTRACT:\n{contract}")
 
@@ -325,22 +338,28 @@ def test_writer(state: SwarmState):
     manifest = state.get("file_manifest", {})
 
     system = (
-        "You are a Python test engineer. Write a pytest test suite based SOLELY on "
-        "the interface contract provided. Do NOT invent behaviour beyond what the contract specifies.\n"
-        "Output test files wrapped in XML tags:\n"
-        '<file name="tests/test_main.py">\n...\n</file>\n'
+        "You are the test writer node in a TDD pipeline.\n"
+        "Tests are written before any implementation exists. They verify that the contract holds —\n"
+        "they are the executable check on correctness, not a cage for the implementer.\n\n"
+        "Write a pytest test suite that covers exactly what the interface contract specifies —\n"
+        "every behavior, return guarantee, and raise-rule it defines, and nothing it does not.\n\n"
+        "Output each test file wrapped in an XML tag:\n"
+        '<file name="tests/test_main.py">\n'
+        "# file content here\n"
+        "</file>\n\n"
         "RULES:\n"
-        "1. ALL test files go in a tests/ subdirectory named test_*.py.\n"
-        "2. Always include a tests/__init__.py file.\n"
-        "3. Import from src (e.g. from src.module import thing).\n"
-        "4. Use pytest and hypothesis for property-based testing where appropriate.\n"
-        "   Hypothesis rules: constrain strategies to the correct domain directly "
-        "(e.g. st.integers(min_value=0) not assume(x >= 0)); for ordered inputs "
-        "produce sorted data directly (e.g. st.lists(st.integers()).map(sorted)); "
-        "add @settings(max_examples=50) to every @given test; "
-        "never use assume() to enforce non-trivial preconditions.\n"
-        "5. Output raw Python inside the XML tags — no markdown fences.\n"
-        "6. Only output test files — no source or requirements files."
+        "1. ALL test files go in a tests/ subdirectory and must be named test_*.py.\n"
+        "2. Always include a tests/__init__.py (can be empty).\n"
+        "3. Import the implementation from src.main (the public API lives there).\n"
+        "4. Reach for hypothesis where a property holds across a whole input domain and "
+        "property-based testing earns its keep. For fixed behaviors and specific cases, a plain "
+        "assertion is clearer. When you do use hypothesis:\n"
+        "   - Constrain the strategy at the source rather than filtering with assume().\n"
+        "     A bounded strategy like st.integers(min_value=1) is better than st.integers() with a guard.\n"
+        "   - Generate inputs already in the required shape — sorted data via .map(sorted), for example.\n"
+        "   - Add @settings(max_examples=50) to every @given test.\n"
+        "5. Output raw Python inside the XML tags — no markdown code fences.\n"
+        "6. Output ONLY test files — no src/ files, no requirements.txt."
     )
 
     user_prompt = f"Interface Contract:\n{contract}"
@@ -425,12 +444,21 @@ def contract_verifier(state: SwarmState):
     )
 
     system = (
-        "You are a contract compliance checker for a TDD pipeline.\n"
-        "Given an interface contract and a test suite, determine whether the tests "
-        "correctly and completely reflect the contract.\n"
-        "Respond with EXACTLY one of:\n"
-        "PASS\n"
-        "FAIL: <one sentence describing the specific gap or mismatch>"
+        "You are the contract compliance checker in a TDD pipeline.\n"
+        "Tests were written from an interface contract before any implementation existed.\n"
+        "Your job: confirm the tests faithfully reflect what the contract states.\n\n"
+        "Check two things only:\n"
+        "  - Do any tests contradict the contract — wrong signature, wrong return, "
+        "an exception the contract does not specify, or behavior the contract does not define?\n"
+        "  - Does any behavior, return guarantee, or raise-rule the contract explicitly states "
+        "go untested?\n\n"
+        "Judge against what the contract actually says. Do not require tests for inputs or cases "
+        "the contract does not mention — absence from the contract is not a gap.\n\n"
+        "If the tests faithfully reflect the contract, respond with exactly:\n"
+        "PASS\n\n"
+        "Otherwise list each real issue, one sentence per line:\n"
+        "FAIL: <contradiction or untested contract requirement>\n"
+        "FAIL: <contradiction or untested contract requirement>"
     )
 
     user_prompt = f"Contract:\n{contract}\n\nTest Suite:\n{test_context}"
@@ -507,23 +535,27 @@ def code_writer(state: SwarmState):
     graveyard = state.get("rollback_graveyard", [])
     manifest = state.get("file_manifest", {})
 
-    test_context = "\n\n".join(
-        f"# {filename}\n{code}"
-        for filename, code in manifest.items()
-        if filename.startswith("tests/") and filename.endswith(".py")
-    )
-
     system = (
-        "You are a master Python programmer working in TDD mode. "
-        "A test suite has already been written — your job is to write an implementation that passes it.\n"
-        "Output implementation files wrapped in XML tags:\n"
-        '<file name="src/main.py">\n...\n</file>\n'
+        "You are the implementation node in a TDD pipeline.\n"
+        "Your job is to correctly implement the interface contract.\n"
+        "The contract defines the expected inputs, outputs, exceptions, and edge cases — "
+        "that is what you are writing to.\n"
+        "A test suite will verify your implementation against the contract. "
+        "Do not optimise for the tests — implement the contract correctly and the tests will pass.\n\n"
+        "Output each source file wrapped in an XML tag:\n"
+        '<file name="src/main.py">\n'
+        "# file content here\n"
+        "</file>\n\n"
         "RULES:\n"
-        "1. All source files go in src/. Always include src/__init__.py.\n"
-        '2. Always output a <file name="requirements.txt"> listing every third-party dependency.\n'
-        "3. Do NOT output any test files — tests are frozen.\n"
-        "4. Output raw Python inside the XML tags — no markdown fences.\n"
-        "5. The contract is your primary spec — implement it correctly. Tests verify the contract; they do not replace it."
+        "1. The public implementation lives in src/main.py. The test suite imports from src.main, "
+        "so the contract's public functions and classes must be defined or importable there.\n"
+        "2. Always include src/__init__.py. Additional helper modules may go in src/ if useful.\n"
+        '3. Always output a <file name="requirements.txt"> listing every third-party pip dependency.\n'
+        "   If no third-party packages are needed, output an empty requirements.txt.\n"
+        "4. Do NOT output any test files.\n"
+        "5. Output raw Python inside the XML tags — no markdown code fences.\n"
+        "6. Do not hardcode outputs or special-case inputs — implement the actual logic.\n"
+        "   A semantic validator checks for this and will send you back if found.\n"
     )
 
     user_prompt = prompt
@@ -531,8 +563,6 @@ def code_writer(state: SwarmState):
         user_prompt += f"\n\nInterface Contract (primary spec — implement this correctly, do not find loopholes):\n{contract}"
     if plan:
         user_prompt += f"\n\nArchitecture Plan:\n{plan}"
-    if test_context:
-        user_prompt += f"\n\nTests to pass:\n{test_context}"
     if errors:
         user_prompt += f"\n\nPrevious failures — fix the implementation:\n{errors}"
     if graveyard:
@@ -540,55 +570,63 @@ def code_writer(state: SwarmState):
             graveyard[-2:]
         )
 
-    try:
-        response = get_llm("code_writer").invoke(
-            [SystemMessage(content=system), HumanMessage(content=user_prompt)]
-        )
-        content = response.content if hasattr(response, "content") else ""
+    ws = state.get("workspace_dir", "")
+    max_attempts = 3
+    last_error = None
 
-        new_files = {}
-        matches = re.finditer(
-            r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
-            content,
-            re.DOTALL | re.IGNORECASE,
-        )
-        for match in matches:
-            code = match.group(2).strip()
-            code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
-            filename = match.group(1).strip()
-            if filename.startswith("src/") or filename == "requirements.txt":
-                new_files[filename] = code
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if attempt > 1:
+                _think(ws, "code_writer", f"Retry {attempt - 1}/{max_attempts - 1} after: {str(last_error)[:80]}")
 
-        if not new_files:
-            raise ValueError("Failed XML formatting.")
+            response = get_llm("code_writer").invoke(
+                [SystemMessage(content=system), HumanMessage(content=user_prompt)]
+            )
+            content = response.content if hasattr(response, "content") else ""
 
-        ws = state.get("workspace_dir", "")
-        file_summary = "\n".join(
-            f"  {fname} ({len(code)} chars)" for fname, code in new_files.items()
-        )
-        _diag(ws, "code_writer", f"Source files:\n{file_summary}")
+            new_files = {}
+            matches = re.finditer(
+                r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
+                content,
+                re.DOTALL | re.IGNORECASE,
+            )
+            for match in matches:
+                code = match.group(2).strip()
+                code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
+                filename = match.group(1).strip()
+                if filename.startswith("src/") or filename == "requirements.txt":
+                    new_files[filename] = code
 
-        # Keep the frozen tests; replace only src/ and requirements.txt
-        test_files = {k: v for k, v in manifest.items() if k.startswith("tests/")}
-        return {
-            "file_manifest": {**test_files, **new_files},
-            "next_node": "static_analyzer",
-            "thoughts": _think(
-                ws,
-                "code_writer",
-                f"Wrote {len(new_files)} source files"
-                + (f" — fixing: {errors[:80]}" if errors else ""),
-            ),
-        }
+            if not new_files:
+                raise ValueError("Failed XML formatting.")
 
-    except Exception as e:
-        return {
-            "verification_errors": f"Code Writer Error: {str(e)}",
-            "next_node": "error_distiller",
-            "thoughts": _think(
-                state.get("workspace_dir", ""), "code_writer", f"ERROR: {str(e)[:100]}"
-            ),
-        }
+            file_summary = "\n".join(
+                f"  {fname} ({len(code)} chars)" for fname, code in new_files.items()
+            )
+            _diag(ws, "code_writer", f"Source files:\n{file_summary}")
+
+            # Keep the frozen tests; replace only src/ and requirements.txt
+            test_files = {k: v for k, v in manifest.items() if k.startswith("tests/")}
+            return {
+                "file_manifest": {**test_files, **new_files},
+                "next_node": "static_analyzer",
+                "thoughts": _think(
+                    ws,
+                    "code_writer",
+                    f"Wrote {len(new_files)} source files"
+                    + (f" — fixing: {errors[:80]}" if errors else ""),
+                ),
+            }
+
+        except Exception as e:
+            last_error = e
+            _diag(ws, "code_writer", f"Attempt {attempt}/{max_attempts} failed: {e}")
+
+    return {
+        "verification_errors": f"Code Writer Error: {str(last_error)}",
+        "next_node": "error_distiller",
+        "thoughts": _think(ws, "code_writer", f"ERROR after {max_attempts} attempts: {str(last_error)[:80]}"),
+    }
 
 
 # ---------------------------------------------------------
@@ -660,6 +698,11 @@ def deterministic_verifier(state: SwarmState):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w") as f:
             f.write(code)
+
+    # Clear stale src/ so orphan files from a previous loop don't persist on disk.
+    src_dir = os.path.join(workspace, "src")
+    if os.path.exists(src_dir):
+        shutil.rmtree(src_dir)
 
     # Clear stale deps so a changed requirements.txt on retry gets a clean install.
     # Pre-create so the container user (running as host UID) can write into it.
@@ -836,13 +879,15 @@ def error_distiller(state: SwarmState):
         )
 
         system = (
-            "You are a semantic contract validator for a TDD code generation pipeline.\n"
-            "Given an interface contract and a Python implementation, determine whether "
-            "the implementation correctly and completely fulfils the contract — not just "
-            "whether it passes specific test cases.\n"
-            "Look for: hardcoded outputs, missing edge-case handling, loopholes that satisfy "
-            "test assertions without implementing the actual algorithm.\n"
-            "Respond with EXACTLY one of:\n"
+            "You are the semantic contract validator in a TDD pipeline.\n"
+            "Review the implementation against the contract as an independent check on whether\n"
+            "it genuinely implements the specified behavior, not just whether it runs.\n\n"
+            "Look specifically for:\n"
+            "- Hardcoded outputs: returning a known value instead of computing the result\n"
+            "- Special-casing: branching on particular inputs to fake correctness\n"
+            "- Missing algorithm: satisfying assertions without implementing the real logic\n"
+            "- Missing behavior: a guarantee the contract states that the code silently skips\n\n"
+            "Respond with EXACTLY one of these two formats — no other text:\n"
             "PASS\n"
             "FAIL: <one sentence describing the specific violation or loophole>"
         )
@@ -970,15 +1015,20 @@ def error_distiller(state: SwarmState):
         next_node = "code_writer"
     else:
         system = (
-            "You are a fault classifier for a TDD code generation pipeline.\n"
-            "Given a contract and a failure trace, classify the fault and provide a fix instruction.\n"
-            "Respond in EXACTLY this format (two lines, no extra text):\n"
+            "You are the fault classifier in a TDD pipeline.\n"
+            "A test run failed. Classify where the fault lies and write a one-sentence fix instruction.\n\n"
+            "Respond in EXACTLY this format — two lines, no other text:\n"
             "FAULT: implementation|tests|spec\n"
             "INSTRUCTION: <one actionable sentence for the responsible node>\n\n"
-            "FAULT TYPES:\n"
-            "- implementation: the code does not correctly satisfy what the tests expect\n"
-            "- tests: the tests do not correctly reflect the interface contract\n"
-            "- spec: the contract itself is ambiguous, incomplete, or incorrect"
+            "FAULT TYPE DEFINITIONS:\n"
+            "- implementation: code logic is wrong or incomplete; tests and contract are correct\n"
+            "  Example: tests expect sorted output but the sort step is missing from the implementation\n"
+            "- tests: tests contradict or misrepresent the interface contract\n"
+            "  Example: tests import a function name that differs from what the contract specifies\n"
+            "- spec: the contract is ambiguous, contradictory, or missing required detail\n"
+            "  Example: the contract omits the return type and the tests disagree on what it should be\n\n"
+            "Default to 'implementation' when the error is a runtime exception or assertion failure\n"
+            "with no evidence of a test or contract problem."
         )
 
         user_prompt = f"Contract:\n{contract}\n\nFailure Trace:\n{raw_error}"
@@ -1071,8 +1121,18 @@ def archivist_node(state: SwarmState):
             ),
         }
 
-    system = "Summarise the successful architectural plan and contract into 3 core constraints. Output ONLY markdown."
-    prompt = f"Current Ledger:\n{ledger}\n\nPlan:\n{plan}\n\nContract:\n{contract}"
+    system = (
+        "You are the archivist node in a TDD pipeline. A coding task just completed successfully.\n"
+        "Distil the contract into exactly 3 core constraints — the key invariants or non-obvious\n"
+        "decisions that would be easy to get wrong on a second pass.\n\n"
+        "Output a single markdown section in this format:\n\n"
+        "## Task: <one-line description inferred from the contract>\n"
+        "1. <constraint>\n"
+        "2. <constraint>\n"
+        "3. <constraint>\n\n"
+        "Output ONLY the markdown section — no preamble, no explanation."
+    )
+    prompt = f"Current Ledger:\n{ledger}\n\nContract:\n{contract}"
 
     try:
         res = get_llm("archivist_node").invoke(

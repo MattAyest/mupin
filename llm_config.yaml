@@ -32,8 +32,8 @@
 #   provider: "openai-compatible"  model: "your-model"  base_url: "http://host.docker.internal:8001/v1"
 #
 # WORKLOAD TIERS (rough guide for choosing models)
-#   light   -> short classify/summarize calls         e.g. gpt-oss:20b
-#   heavy   -> strong coding / long reasoning          e.g. qwen3-coder:480b, gpt-oss:120b
+#   light   -> short classify/summarize calls         e.g. nemotron-3-nano:30b-cloud
+#   heavy   -> strong coding / long reasoning          e.g. kimi-k2.7-code:cloud
 #   premium -> the "very heaviest lifting" — escalate to a frontier API
 #              (gemini-2.5-pro, claude-3-5-sonnet, gpt-4o) if Ollama quality
 #              is not good enough on the architect / code_writer nodes.
@@ -59,16 +59,16 @@ nodes:
     # WORKLOAD: heavy — needs solid coding + hypothesis fluency.
     test_writer:
         provider: "ollama-cloud"
-        model: "qwen3-coder:480b"
+        model: "kimi-k2.7-code:cloud"
         temperature: 0.3
         api_key_env_var: "OLLAMA_API_KEY"
-        # Alternatives: gpt-oss:120b (ollama-cloud) | gpt-4o (openai)
+        # Alternatives: nemotron-3-nano:30b-cloud (ollama-cloud) | kimi-k2.7-code:cloud (ollama-cloud)
 
     # PASS/FAIL check that tests match the contract.
-    # WORKLOAD: light — cheap, fast, deterministic.
+    # WORKLOAD: medium-light — structured doc comparison.
     contract_verifier:
         provider: "ollama-cloud"
-        model: "gpt-oss:20b"
+        model: "nemotron-3-nano:30b-cloud"
         temperature: 0
         api_key_env_var: "OLLAMA_API_KEY"
 
@@ -76,7 +76,7 @@ nodes:
     # WORKLOAD: premium — heaviest coding in the pipeline.
     code_writer:
         provider: "ollama-cloud"
-        model: "qwen3-coder:480b"
+        model: "kimi-k2.7-code:cloud"
         temperature: 0.1
         api_key_env_var: "OLLAMA_API_KEY"
         # Recommended escalation for the very heaviest lifting:
@@ -84,10 +84,10 @@ nodes:
         #   provider: "google-genai"  model: "gemini-2.5-pro"           api_key_env_var: "GOOGLE_API_KEY"
 
     # Classifies failures (impl/tests/spec) and does semantic contract checks.
-    # WORKLOAD: light-to-medium — bump to gpt-oss:120b for sharper judgement.
+    # WORKLOAD: medium — fault classification and semantic validation.
     error_distiller:
         provider: "ollama-cloud"
-        model: "gpt-oss:120b"
+        model: "nemotron-3-nano:30b-cloud"
         temperature: 0
         api_key_env_var: "OLLAMA_API_KEY"
 
@@ -95,7 +95,7 @@ nodes:
     # WORKLOAD: light.
     archivist_node:
         provider: "ollama-cloud"
-        model: "gpt-oss:20b"
+        model: "nemotron-3-nano:30b-cloud"
         temperature: 0
         api_key_env_var: "OLLAMA_API_KEY"
 

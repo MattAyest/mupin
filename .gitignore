@@ -30,6 +30,9 @@ docker-compose.override.yml
 # IDE / tool config
 .claude/settings.local.json
 
+# Session notes (AI onboarding guide — not for version control)
+SESSION_NOTES.md
+
 # OS generated files
 .DS_Store
 Thumbs.db
