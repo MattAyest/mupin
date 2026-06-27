@@ -1,42 +1,4 @@
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-
-# Environment variables
-.env
-.env.local
-
-# LangGraph / Swarm Output directories
-.workspaces/
-
-# Benchmark run output (append-only history; runner.py + questions.json are kept)
-benchmarks/results.jsonl
-
-# Ollama Data & Models
-ollama_data/
-
-# Testing and Coverage
-.pytest_cache/
-.hypothesis/
-.coverage
-htmlcov/
-
-# Docker
-docker-compose.override.yml
-
-# IDE / tool config
-.claude/settings.local.json
-
-# Session notes (AI onboarding guide — not for version control)
-SESSION_NOTES.md
-
-# OS generated files
-.DS_Store
-Thumbs.db
-.aider*
+benchmarks/__init__.py
+benchmarks/questions.json
+benchmarks/runner.py
+benchmarks/results.jsonl   (if you want me to inspect past runs)
