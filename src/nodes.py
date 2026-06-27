@@ -339,6 +339,13 @@ def architect_node(state: SwarmState):
         "architectural_plan": plan,
         "interface_contract": contract,
         "contract_check_count": 0,
+        # A new contract starts a fresh implementation cycle: drop the now-obsolete
+        # tests/code so the writers regenerate against the new spec (rather than
+        # minimally patching artifacts built for the old one), and clear the stale
+        # error that triggered the replan. The graveyard is intentionally kept so
+        # failed approaches are still carried forward as "avoid" guidance.
+        "file_manifest": {},
+        "verification_errors": "",
         "next_node": "test_writer",
         "thoughts": _think(ws, "architect_node", thought),
     }
@@ -358,10 +365,27 @@ def test_writer(state: SwarmState):
 
     system = (
         "You are the test writer node in a TDD pipeline.\n"
-        "Tests are written before any implementation exists. They verify that the contract holds —\n"
-        "they are the executable check on correctness, not a cage for the implementer.\n\n"
-        "Write a pytest test suite that covers exactly what the interface contract specifies —\n"
-        "every behavior, return guarantee, and raise-rule it defines, and nothing it does not.\n\n"
+        "Tests are written before any implementation exists. They are the executable proof that the\n"
+        "contract holds — aim for a suite you would trust to gate PRODUCTION code.\n\n"
+        "QUALITY OVER COUNT. A test earns its place only if it catches a defect no other test would.\n"
+        "Maximize bug-catching power, not the number of tests. Do NOT write multiple enumerated\n"
+        "variants of the same rule (e.g. n=1, n=2, n=3 of one behavior) — collapse them into a single\n"
+        "property test. Redundant tests add risk (a mistyped expected value) and cost, not coverage.\n\n"
+        "Build the suite from these techniques, choosing whichever fits each part of the contract:\n"
+        "  - RULE COVERAGE: one test for each behavior, return guarantee, and raise-rule the contract\n"
+        "    states. Every rule must be exercised at least once.\n"
+        "  - PROPERTY-BASED (hypothesis): for any invariant or relation that holds across an input\n"
+        "    domain, write a property test instead of examples — it explores far more inputs and is\n"
+        "    where real reliability comes from.\n"
+        "  - BOUNDARY: the genuine edges — empty, single element, zero, maximum, precision limits, and\n"
+        "    any precedence/associativity or ordering fork the contract defines.\n"
+        "  - METAMORPHIC / ROUND-TRIP: relations that must always hold, e.g. decode(encode(x)) == x,\n"
+        "    when the contract implies one.\n\n"
+        "Derive every expected value from the contract's RULES, not by guessing. If the contract\n"
+        "states a precedence, associativity, or raise rule, compute the expected result from it.\n\n"
+        "STAY INSIDE THE CONTRACT'S VALID INPUT DOMAIN. An input the contract says must raise is NOT a\n"
+        "valid input for a success assertion — exclude it at the source of the strategy, and test\n"
+        "those inputs separately under pytest.raises.\n\n"
         "Output each test file wrapped in an XML tag:\n"
         '<file name="tests/test_main.py">\n'
         "# file content here\n"
@@ -370,19 +394,38 @@ def test_writer(state: SwarmState):
         "1. ALL test files go in a tests/ subdirectory and must be named test_*.py.\n"
         "2. Always include a tests/__init__.py (can be empty).\n"
         "3. Import the implementation from src.main (the public API lives there).\n"
-        "4. Reach for hypothesis where a property holds across a whole input domain and "
-        "property-based testing earns its keep. For fixed behaviors and specific cases, a plain "
-        "assertion is clearer. When you do use hypothesis:\n"
+        "4. When using hypothesis:\n"
         "   - Constrain the strategy at the source rather than filtering with assume().\n"
         "     A bounded strategy like st.integers(min_value=1) is better than st.integers() with a guard.\n"
         "   - Generate inputs already in the required shape — sorted data via .map(sorted), for example.\n"
+        "   - Keep every generated input within the contract's valid domain.\n"
         "   - Add @settings(max_examples=50) to every @given test.\n"
         "5. Output raw Python inside the XML tags — no markdown code fences.\n"
         "6. Output ONLY test files — no src/ files, no requirements.txt."
     )
 
+    prior_tests = {
+        k: v
+        for k, v in manifest.items()
+        if k.startswith("tests/") and k.endswith(".py")
+    }
+
     user_prompt = f"Interface Contract:\n{contract}"
-    if errors:
+    if errors and prior_tests:
+        # Revise the existing suite — do NOT regenerate from scratch. Rewriting
+        # drops tests that were already correct and makes the suite churn.
+        current_tests = "\n\n".join(
+            f'<file name="{fname}">\n{code}\n</file>'
+            for fname, code in prior_tests.items()
+        )
+        user_prompt += (
+            f"\n\nYour current test suite:\n{current_tests}"
+            f"\n\nIt was flagged with:\n{errors}"
+            f"\n\nMake the MINIMAL change needed to fix the flagged test(s). Keep every other "
+            f"test exactly as it is — do not drop, rename, or rewrite tests that already match "
+            f"the contract. Output the complete revised file(s)."
+        )
+    elif errors:
         user_prompt += (
             f"\n\nPrevious failures — revise tests to match the contract:\n{errors}"
         )
@@ -457,6 +500,12 @@ def contract_verifier(state: SwarmState):
     manifest = state.get("file_manifest", {})
     check_count = state.get("contract_check_count", 0) + 1
 
+    # If an implementation already exists, this is a re-verification after a
+    # tests-only revision: re-run the EXISTING code against the new tests instead
+    # of regenerating it (regeneration discards a working solution and regresses).
+    # Only the first pass, with no code yet, needs the implementation written.
+    proceed_node = "static_analyzer" if "src/main.py" in manifest else "code_writer"
+
     test_context = "\n\n".join(
         f"# {filename}\n{code}"
         for filename, code in manifest.items()
@@ -467,9 +516,15 @@ def contract_verifier(state: SwarmState):
         "You are the contract compliance checker in a TDD pipeline.\n"
         "Tests were written from an interface contract before any implementation existed.\n"
         "Your job: confirm the tests faithfully reflect what the contract states.\n\n"
-        "Check two things only:\n"
+        "Check these things:\n"
         "  - Do any tests contradict the contract — wrong signature, wrong return, "
         "an exception the contract does not specify, or behavior the contract does not define?\n"
+        "  - Does any assertion expect a value that contradicts the contract's stated rules or "
+        "guarantees? Derive the correct expected value from the rules (precedence, associativity, "
+        "raise-rules) and flag any assertion that disagrees.\n"
+        "  - Does any hypothesis strategy generate inputs outside the contract's valid input "
+        "domain and then assert success? An input the contract says must raise is not a valid "
+        "input for a success assertion — the strategy must exclude it at the source.\n"
         "  - Does any behavior, return guarantee, or raise-rule the contract explicitly states "
         "go untested?\n\n"
         "Judge against what the contract actually says. Do not require tests for inputs or cases "
@@ -495,7 +550,7 @@ def contract_verifier(state: SwarmState):
         return {
             "contract_check_count": check_count,
             "verification_errors": f"Contract verifier unavailable: {str(e)}",
-            "next_node": "code_writer",
+            "next_node": proceed_node,
             "thoughts": _think(
                 state.get("workspace_dir", ""),
                 "contract_verifier",
@@ -507,11 +562,12 @@ def contract_verifier(state: SwarmState):
         return {
             "contract_check_count": check_count,
             "verification_errors": "",
-            "next_node": "code_writer",
+            "next_node": proceed_node,
             "thoughts": _think(
                 ws,
                 "contract_verifier",
-                "Tests match contract — PASS",
+                "Tests match contract — PASS"
+                + (" (re-verifying existing code)" if proceed_node == "static_analyzer" else ""),
             ),
         }
 
@@ -521,7 +577,7 @@ def contract_verifier(state: SwarmState):
         return {
             "contract_check_count": check_count,
             "verification_errors": "",
-            "next_node": "code_writer",
+            "next_node": proceed_node,
             "thoughts": _think(
                 ws,
                 "contract_verifier",
@@ -578,12 +634,33 @@ def code_writer(state: SwarmState):
         "   A semantic validator checks for this and will send you back if found.\n"
     )
 
+    prior_src = {
+        k: v
+        for k, v in manifest.items()
+        if k.startswith("src/") and k.endswith(".py")
+    }
+
     user_prompt = prompt
     if contract:
         user_prompt += f"\n\nInterface Contract (primary spec — implement this correctly, do not find loopholes):\n{contract}"
     if plan:
         user_prompt += f"\n\nArchitecture Plan:\n{plan}"
-    if errors:
+    if errors and prior_src:
+        # Revise the existing implementation — do NOT rewrite from scratch.
+        # Regenerating discards working code and regresses behavior that already
+        # passed. Give the writer its own prior source to patch minimally.
+        current_impl = "\n\n".join(
+            f'<file name="{fname}">\n{code}\n</file>'
+            for fname, code in prior_src.items()
+        )
+        user_prompt += (
+            f"\n\nYour current implementation (already passing most tests):\n{current_impl}"
+            f"\n\nIt failed with:\n{errors}"
+            f"\n\nMake the MINIMAL change needed to fix this specific failure. Preserve all "
+            f"behavior that already works — do not rewrite or restructure. Output the complete "
+            f"revised file(s)."
+        )
+    elif errors:
         user_prompt += f"\n\nPrevious failures — fix the implementation:\n{errors}"
     if graveyard:
         user_prompt += "\n\nAVOID these failed approaches:\n" + "\n".join(
@@ -1038,8 +1115,9 @@ def error_distiller(state: SwarmState):
         system = (
             "You are the fault classifier in a TDD pipeline.\n"
             "A test run failed. Classify where the fault lies and write a one-sentence fix instruction.\n\n"
-            "Respond in EXACTLY this format — two lines, no other text:\n"
-            "FAULT: implementation|tests|spec\n"
+            "Respond in EXACTLY this format — two lines, no other text. The FAULT line must contain\n"
+            "exactly ONE of these words and nothing else: implementation, tests, or spec.\n"
+            "FAULT: <implementation, tests, or spec>\n"
             "INSTRUCTION: <one actionable sentence for the responsible node>\n\n"
             "FAULT TYPE DEFINITIONS:\n"
             "- implementation: code logic is wrong or incomplete; tests and contract are correct\n"
@@ -1054,6 +1132,8 @@ def error_distiller(state: SwarmState):
 
         user_prompt = f"Contract:\n{contract}\n\nFailure Trace:\n{raw_error}"
 
+        VALID_FAULTS = ("implementation", "tests", "spec")
+
         try:
             res = get_llm("error_distiller").invoke(
                 [SystemMessage(content=system), HumanMessage(content=user_prompt)]
@@ -1061,16 +1141,35 @@ def error_distiller(state: SwarmState):
             lines = res.content.strip().splitlines()
 
             fault_line = next(
-                (l for l in lines if l.upper().startswith("FAULT:")),
-                "FAULT: implementation",
+                (l for l in lines if l.upper().startswith("FAULT:")), ""
             )
             instr_line = next(
-                (l for l in lines if l.upper().startswith("INSTRUCTION:")),
-                f"INSTRUCTION: {raw_error[:200]}",
+                (l for l in lines if l.upper().startswith("INSTRUCTION:")), ""
             )
 
-            fault_type = fault_line.split(":", 1)[1].strip().lower()
-            instruction = instr_line.split(":", 1)[1].strip()
+            raw_fault = fault_line.split(":", 1)[1].strip().lower() if ":" in fault_line else ""
+            instruction = instr_line.split(":", 1)[1].strip() if ":" in instr_line else ""
+
+            # Accept an exact match, or a value wrapped in extra words (exactly one
+            # valid word present). An echoed template ('implementation|tests|spec')
+            # names all three, so it resolves to None — fall back loudly instead of
+            # silently misrouting to the default.
+            if raw_fault in VALID_FAULTS:
+                fault_type = raw_fault
+            else:
+                present = [v for v in VALID_FAULTS if re.search(rf"\b{v}\b", raw_fault)]
+                fault_type = present[0] if len(present) == 1 else None
+
+            if fault_type is None:
+                fault_type = "implementation"
+                _diag(
+                    workspace,
+                    "error_distiller",
+                    f"WARNING: unusable fault classification — defaulting to 'implementation'. "
+                    f"Raw FAULT line: {fault_line!r}",
+                )
+            if not instruction:
+                instruction = raw_error[:200]
 
             next_node = {"tests": "test_writer", "spec": "architect_node"}.get(
                 fault_type, "code_writer"

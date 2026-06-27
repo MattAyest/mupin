@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from typing import Any, Dict, List
 
@@ -5,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -24,6 +25,11 @@ for _node, _err in validate_config():
 # Simple in-memory store for task status.
 # For production, you might want to use Redis or a database.
 tasks_db: Dict[str, Dict[str, Any]] = {}
+
+# Live asyncio handles for in-flight tasks, so a task can be cancelled (e.g. the
+# benchmark runner cancelling on timeout instead of leaving it running and
+# contending with the next task). Cleared when the task settles.
+running_tasks: Dict[str, "asyncio.Task"] = {}
 
 
 class TaskRequest(BaseModel):
@@ -79,14 +85,24 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
         tasks_db[task_id]["status"] = "completed"
         tasks_db[task_id]["result"] = final_manifest
 
+    except asyncio.CancelledError:
+        # Cancelled via /task/{id}/cancel. Cancellation lands at the next node
+        # boundary (between astream yields), so the task stops promptly rather
+        # than running on as an orphan.
+        tasks_db[task_id]["status"] = "cancelled"
+        tasks_db[task_id]["error"] = "Task cancelled"
+        tasks_db[task_id]["result"] = None
+        raise
     except Exception as e:
         tasks_db[task_id]["status"] = "failed"
         tasks_db[task_id]["error"] = str(e)
         tasks_db[task_id]["result"] = None
+    finally:
+        running_tasks.pop(task_id, None)
 
 
 @app.post("/task", response_model=TaskStatusResponse)
-async def generate_code(request: TaskRequest, background_tasks: BackgroundTasks):
+async def generate_code(request: TaskRequest):
     """
     Accepts a code generation prompt, starts the swarm asynchronously,
     and returns a task_id immediately.
@@ -109,8 +125,27 @@ async def generate_code(request: TaskRequest, background_tasks: BackgroundTasks)
         "thoughts": [],
     }
 
-    # Trigger the background LangGraph execution
-    background_tasks.add_task(run_swarm_task, task_id, request.prompt, workspace_dir)
+    # Trigger the LangGraph execution as a tracked asyncio task so it can be
+    # cancelled (BackgroundTasks gives no handle, which let timed-out tasks run on).
+    running_tasks[task_id] = asyncio.create_task(
+        run_swarm_task(task_id, request.prompt, workspace_dir)
+    )
+
+    return tasks_db[task_id]
+
+
+@app.post("/task/{task_id}/cancel", response_model=TaskStatusResponse)
+async def cancel_task(task_id: str):
+    """Cancel an in-flight task. Idempotent — a settled task is returned as-is."""
+    if task_id not in tasks_db:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    handle = running_tasks.get(task_id)
+    if handle is not None and not handle.done():
+        handle.cancel()
+        # Reflect intent immediately; run_swarm_task's CancelledError handler
+        # also sets this once cancellation is actually delivered.
+        tasks_db[task_id]["status"] = "cancelled"
 
     return tasks_db[task_id]
 
