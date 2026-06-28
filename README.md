@@ -37,7 +37,7 @@ error_distiller ──► code_writer  (impl)     │
 
 1. **Architect** acts as a systems/data engineer: defines the architectural shape and a precise behavioral contract (signatures, return guarantees, raise-rules stated as rules rather than enumerated lists).
 2. **Test writer** writes a pytest suite that verifies the contract — never sees the implementation. Imports from `src.main`.
-3. **Contract verifier** checks (cheaply) that the tests faithfully reflect what the contract explicitly states; retries up to 3 times.
+3. **Contract verifier** checks (cheaply) that the tests faithfully reflect what the contract explicitly states; retries up to 3 times. All LLM nodes share a small retry wrapper (`_invoke_with_retry`) for transient provider errors; if retries are exhausted, the task fails fast with a clear `failed` status instead of silently proceeding with bad output.
 4. **Code writer** implements the contract (not the tests) in `src/main.py` — correct behavior makes the tests pass as a consequence.
 5. **Static analyzer** catches syntax errors deterministically before running Docker.
 6. **Deterministic verifier** installs deps and runs pytest inside a hardened `python:3.11-slim` sibling container (network disabled during test run).
@@ -104,6 +104,20 @@ curl http://localhost:8000/task/<task_id>
 ```
 
 Response includes `status`, `current_node`, `loop_count`, `regression_count`, `replan_count`, `thoughts` (one-line per-node log), and on completion `result` (the full file manifest).
+
+Status values:
+- `running` — task is active
+- `completed` — tests passed, semantic validation passed, and the ledger was archived (`archivist_node` reached)
+- `exhausted` — loop/replan ceiling reached or server deadline exceeded without success
+- `cancelled` — task was cancelled via `POST /task/<task_id>/cancel`
+- `failed` — the graph raised an unhandled exception, including `LLMUnavailableError` when an LLM provider fails after retries
+
+**Cancel an in-flight task:**
+```bash
+curl -X POST http://localhost:8000/task/<task_id>/cancel
+```
+
+Useful for benchmark harnesses that time out: cancelling stops the pipeline promptly instead of leaving an orphan task running.
 
 **Watch the thought log:**
 ```bash

@@ -5,6 +5,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 from datetime import datetime
 from functools import lru_cache
 
@@ -12,6 +13,23 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import SwarmState
+
+
+class LLMUnavailableError(Exception):
+    """Raised when an LLM call is retried up to the configured cap and still fails.
+
+    This is an infrastructure fault, not a code/test/spec fault. It is surfaced
+    as a terminal failure so the run is not silently scored as a code-quality
+    issue and the operator sees a clear message.
+    """
+
+    def __init__(self, node_name: str, attempts: int, cause: Exception):
+        self.node_name = node_name
+        self.attempts = attempts
+        self.cause = cause
+        super().__init__(
+            f"LLM for node '{node_name}' failed after {attempts} attempt(s): {cause}"
+        )
 
 # Load configuration
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "llm_config.yaml")
@@ -199,13 +217,24 @@ def _diag(workspace: str, node: str, detail: str) -> None:
         print(f"[_diag] write failed for {workspace}: {e}", file=sys.stderr)
 
 
-def _invoke_with_retry(node_name: str, messages, workspace: str = "", max_attempts: int = 3):
+def _invoke_with_retry(
+    node_name: str,
+    messages,
+    workspace: str = "",
+    max_attempts: int = 3,
+    backoff_seconds: float = 2.0,
+):
     """Call a node's LLM, retrying on transient errors (network drops, SSL EOF,
-    incomplete reads). These are infrastructure faults, not problems with the
-    prompt or the code, so retrying at the source keeps them from cascading into
-    the fault classifier as a false 'implementation' fault. Returns the response
-    content string; re-raises the last error if every attempt fails."""
-    last_error = None
+    incomplete reads, provider 5xx).
+
+    These are infrastructure faults, not problems with the prompt or the code, so
+    retrying at the source keeps them from cascading into the fault classifier as
+    a false 'implementation' fault.
+
+    Returns the response content string. If all attempts fail, raises
+    LLMUnavailableError so the task fails fast with a clear message.
+    """
+    last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             response = get_llm(node_name).invoke(messages)
@@ -213,8 +242,15 @@ def _invoke_with_retry(node_name: str, messages, workspace: str = "", max_attemp
         except Exception as e:
             last_error = e
             if workspace:
-                _diag(workspace, node_name, f"LLM attempt {attempt}/{max_attempts} failed: {e}")
-    raise last_error
+                _diag(
+                    workspace,
+                    node_name,
+                    f"LLM attempt {attempt}/{max_attempts} failed: {type(e).__name__}: {e}",
+                )
+            if attempt < max_attempts:
+                time.sleep(backoff_seconds)
+
+    raise LLMUnavailableError(node_name, max_attempts, last_error) from last_error
 
 
 # ---------------------------------------------------------
@@ -307,26 +343,21 @@ def architect_node(state: SwarmState):
             f"\n\nRun failed with spec fault — revise the contract:\n{feedback}"
         )
 
-    try:
-        content = _invoke_with_retry(
-            "architect_node",
-            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-            state.get("workspace_dir", ""),
-        )
+    content = _invoke_with_retry(
+        "architect_node",
+        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+        state.get("workspace_dir", ""),
+    )
 
-        plan_match = re.search(
-            r"<plan>(.*?)</plan>", content, re.DOTALL | re.IGNORECASE
-        )
-        contract_match = re.search(
-            r"<contract>(.*?)</contract>", content, re.DOTALL | re.IGNORECASE
-        )
+    plan_match = re.search(
+        r"<plan>(.*?)</plan>", content, re.DOTALL | re.IGNORECASE
+    )
+    contract_match = re.search(
+        r"<contract>(.*?)</contract>", content, re.DOTALL | re.IGNORECASE
+    )
 
-        plan = plan_match.group(1).strip() if plan_match else content
-        contract = contract_match.group(1).strip() if contract_match else content
-
-    except Exception as e:
-        plan = f"Fallback plan: {str(e)}"
-        contract = prompt
+    plan = plan_match.group(1).strip() if plan_match else content
+    contract = contract_match.group(1).strip() if contract_match else content
 
     is_replan = bool(feedback and existing_contract)
     ws = state.get("workspace_dir", "")
@@ -390,7 +421,47 @@ def test_writer(state: SwarmState):
         "4. Constrain hypothesis strategies at the source; never use assume().\n"
         "5. Add @settings(max_examples=50) to every @given test.\n"
         "6. Output raw Python inside the XML tags — no markdown fences.\n"
-        "7. Output ONLY test files."
+        "7. Output ONLY test files.\n\n"
+        "HYPOTHESIS COMPOSITE STRATEGIES:\n"
+        "If you generate recursive structured data (e.g., arithmetic expressions, trees, nested formats),\n"
+        "each recursive helper MUST be its own @st.composite strategy and MUST be called with draw(...).\n"
+        "Never pass a plain str/list to draw(); only pass hypothesis Strategy objects.\n"
+        "Correct recursive pattern (note nested @st.composite and draw(...) on every recursive call):\n"
+        "  @st.composite\n"
+        "  def expressions(draw, max_depth=4):\n"
+        "      number = st.integers(min_value=1, max_value=99).map(str)\n"
+        "      @st.composite\n"
+        "      def factor(draw, depth):\n"
+        "          if depth <= 0: return draw(number)\n"
+        "          choice = draw(st.integers(0, 2))\n"
+        "          if choice == 0: return draw(number)\n"
+        "          if choice == 1:\n"
+        "              inner = draw(expr(depth - 1))\n"
+        "              return f'({inner})'\n"
+        "          op = draw(st.sampled_from('+-'))\n"
+        "          inner = draw(factor(depth - 1))\n"
+        "          return f'{op}{inner}'\n"
+        "      @st.composite\n"
+        "      def term(draw, depth):\n"
+        "          left = draw(factor(depth))\n"
+        "          n = draw(st.integers(0, 2))\n"
+        "          parts = [left]\n"
+        "          for _ in range(n):\n"
+        "              op = draw(st.sampled_from('*/'))\n"
+        "              parts.append(op)\n"
+        "              parts.append(draw(factor(depth)))\n"
+        "          return ''.join(parts)\n"
+        "      @st.composite\n"
+        "      def expr(draw, depth):\n"
+        "          left = draw(term(depth))\n"
+        "          n = draw(st.integers(0, 2))\n"
+        "          parts = [left]\n"
+        "          for _ in range(n):\n"
+        "              op = draw(st.sampled_from('+-'))\n"
+        "              parts.append(op)\n"
+        "              parts.append(draw(term(depth)))\n"
+        "          return ''.join(parts)\n"
+        "      return draw(expr(max_depth))\n"
     )
 
     prior_tests = {
@@ -527,25 +598,13 @@ def contract_verifier(state: SwarmState):
 
     user_prompt = f"Contract:\n{contract}\n\nTest Suite:\n{test_context}"
 
-    try:
-        res = get_llm("contract_verifier").invoke(
-            [SystemMessage(content=system), HumanMessage(content=user_prompt)]
-        )
-        verdict = res.content.strip()
-        ws = state.get("workspace_dir", "")
-        _diag(ws, "contract_verifier", f"Verdict (attempt {check_count}/3):\n{verdict}")
-    except Exception as e:
-        # LLM call failed — surface the error but proceed rather than blocking the pipeline
-        return {
-            "contract_check_count": check_count,
-            "verification_errors": f"Contract verifier unavailable: {str(e)}",
-            "next_node": proceed_node,
-            "thoughts": _think(
-                state.get("workspace_dir", ""),
-                "contract_verifier",
-                f"Validator unavailable, proceeding — {str(e)[:80]}",
-            ),
-        }
+    ws = state.get("workspace_dir", "")
+    verdict = _invoke_with_retry(
+        "contract_verifier",
+        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+        ws,
+    ).strip()
+    _diag(ws, "contract_verifier", f"Verdict (attempt {check_count}/3):\n{verdict}")
 
     if verdict.upper().startswith("PASS"):
         return {
@@ -655,61 +714,52 @@ def code_writer(state: SwarmState):
         )
 
     ws = state.get("workspace_dir", "")
-    max_attempts = 3
-    last_error = None
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            if attempt > 1:
-                _think(ws, "code_writer", f"Retry {attempt - 1}/{max_attempts - 1} after: {str(last_error)[:80]}")
+    content = _invoke_with_retry(
+        "code_writer",
+        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+        ws,
+    )
 
-            response = get_llm("code_writer").invoke(
-                [SystemMessage(content=system), HumanMessage(content=user_prompt)]
-            )
-            content = response.content if hasattr(response, "content") else ""
+    new_files = {}
+    matches = re.finditer(
+        r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    for match in matches:
+        code = match.group(2).strip()
+        code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
+        filename = match.group(1).strip()
+        if filename.startswith("src/") or filename == "requirements.txt":
+            new_files[filename] = code
 
-            new_files = {}
-            matches = re.finditer(
-                r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
-                content,
-                re.DOTALL | re.IGNORECASE,
-            )
-            for match in matches:
-                code = match.group(2).strip()
-                code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
-                filename = match.group(1).strip()
-                if filename.startswith("src/") or filename == "requirements.txt":
-                    new_files[filename] = code
+    if not new_files:
+        # This is a formatting/content problem, not an LLM outage — route to
+        # error_distiller so the loop can recover.
+        err = "Code Writer Error: Failed XML formatting."
+        return {
+            "verification_errors": err,
+            "next_node": "error_distiller",
+            "thoughts": _think(ws, "code_writer", err),
+        }
 
-            if not new_files:
-                raise ValueError("Failed XML formatting.")
+    file_summary = "\n".join(
+        f"  {fname} ({len(code)} chars)" for fname, code in new_files.items()
+    )
+    _diag(ws, "code_writer", f"Source files:\n{file_summary}")
 
-            file_summary = "\n".join(
-                f"  {fname} ({len(code)} chars)" for fname, code in new_files.items()
-            )
-            _diag(ws, "code_writer", f"Source files:\n{file_summary}")
-
-            # Keep the frozen tests; replace only src/ and requirements.txt
-            test_files = {k: v for k, v in manifest.items() if k.startswith("tests/")}
-            return {
-                "file_manifest": {**test_files, **new_files},
-                "next_node": "static_analyzer",
-                "thoughts": _think(
-                    ws,
-                    "code_writer",
-                    f"Wrote {len(new_files)} source files"
-                    + (f" — fixing: {errors[:80]}" if errors else ""),
-                ),
-            }
-
-        except Exception as e:
-            last_error = e
-            _diag(ws, "code_writer", f"Attempt {attempt}/{max_attempts} failed: {e}")
-
+    # Keep the frozen tests; replace only src/ and requirements.txt
+    test_files = {k: v for k, v in manifest.items() if k.startswith("tests/")}
     return {
-        "verification_errors": f"Code Writer Error: {str(last_error)}",
-        "next_node": "error_distiller",
-        "thoughts": _think(ws, "code_writer", f"ERROR after {max_attempts} attempts: {str(last_error)[:80]}"),
+        "file_manifest": {**test_files, **new_files},
+        "next_node": "static_analyzer",
+        "thoughts": _think(
+            ws,
+            "code_writer",
+            f"Wrote {len(new_files)} source files"
+            + (f" — fixing: {errors[:80]}" if errors else ""),
+        ),
     }
 
 
@@ -1010,23 +1060,12 @@ def error_distiller(state: SwarmState):
         )
         user_prompt = f"Contract:\n{contract}\n\nImplementation:\n{impl_context}"
 
-        try:
-            res = get_llm("error_distiller").invoke(
-                [SystemMessage(content=system), HumanMessage(content=user_prompt)]
-            )
-            verdict = res.content.strip()
-            _diag(workspace, "error_distiller", f"Semantic verdict:\n{verdict}")
-        except Exception as e:
-            # Validator unavailable — proceed rather than block the pipeline
-            return {
-                "verification_errors": f"Semantic validator unavailable: {str(e)}",
-                "next_node": "archivist_node",
-                "thoughts": _think(
-                    workspace,
-                    "error_distiller",
-                    f"Semantic validator unavailable — {str(e)[:80]}",
-                ),
-            }
+        verdict = _invoke_with_retry(
+            "error_distiller",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        ).strip()
+        _diag(workspace, "error_distiller", f"Semantic verdict:\n{verdict}")
 
         if verdict.upper().startswith("PASS"):
             return {
@@ -1164,59 +1203,54 @@ def error_distiller(state: SwarmState):
 
         VALID_FAULTS = ("implementation", "tests", "spec")
 
-        try:
-            res = get_llm("error_distiller").invoke(
-                [SystemMessage(content=system), HumanMessage(content=user_prompt)]
+        verdict = _invoke_with_retry(
+            "error_distiller",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        ).strip()
+        _diag(workspace, "error_distiller", f"Raw classifier response:\n{verdict}")
+        lines = verdict.strip().splitlines()
+
+        reasoning_line = next(
+            (l for l in lines if l.upper().startswith("REASONING:")), ""
+        )
+        fault_line = next(
+            (l for l in lines if l.upper().startswith("FAULT:")), ""
+        )
+        instr_line = next(
+            (l for l in lines if l.upper().startswith("INSTRUCTION:")), ""
+        )
+
+        reasoning = reasoning_line.split(":", 1)[1].strip() if ":" in reasoning_line else ""
+        raw_fault = fault_line.split(":", 1)[1].strip().lower() if ":" in fault_line else ""
+        instruction = instr_line.split(":", 1)[1].strip() if ":" in instr_line else ""
+
+        # Accept an exact match, or a value wrapped in extra words (exactly one
+        # valid word present). An echoed template ('implementation|tests|spec')
+        # names all three, so it resolves to None — fall back loudly instead of
+        # silently misrouting to the default.
+        if raw_fault in VALID_FAULTS:
+            fault_type = raw_fault
+        else:
+            present = [v for v in VALID_FAULTS if re.search(rf"\b{v}\b", raw_fault)]
+            fault_type = present[0] if len(present) == 1 else None
+
+        if fault_type is None:
+            fault_type = "implementation"
+            _diag(
+                workspace,
+                "error_distiller",
+                f"WARNING: unusable fault classification — defaulting to 'implementation'. "
+                f"Raw FAULT line: {fault_line!r}",
             )
-            verdict = res.content.strip()
-            _diag(workspace, "error_distiller", f"Raw classifier response:\n{verdict}")
-            lines = verdict.strip().splitlines()
+        if not instruction:
+            instruction = raw_error[:200]
 
-            reasoning_line = next(
-                (l for l in lines if l.upper().startswith("REASONING:")), ""
-            )
-            fault_line = next(
-                (l for l in lines if l.upper().startswith("FAULT:")), ""
-            )
-            instr_line = next(
-                (l for l in lines if l.upper().startswith("INSTRUCTION:")), ""
-            )
+        _diag(workspace, "error_distiller", f"Classifier reasoning: {reasoning}")
 
-            reasoning = reasoning_line.split(":", 1)[1].strip() if ":" in reasoning_line else ""
-            raw_fault = fault_line.split(":", 1)[1].strip().lower() if ":" in fault_line else ""
-            instruction = instr_line.split(":", 1)[1].strip() if ":" in instr_line else ""
-
-            # Accept an exact match, or a value wrapped in extra words (exactly one
-            # valid word present). An echoed template ('implementation|tests|spec')
-            # names all three, so it resolves to None — fall back loudly instead of
-            # silently misrouting to the default.
-            if raw_fault in VALID_FAULTS:
-                fault_type = raw_fault
-            else:
-                present = [v for v in VALID_FAULTS if re.search(rf"\b{v}\b", raw_fault)]
-                fault_type = present[0] if len(present) == 1 else None
-
-            if fault_type is None:
-                fault_type = "implementation"
-                _diag(
-                    workspace,
-                    "error_distiller",
-                    f"WARNING: unusable fault classification — defaulting to 'implementation'. "
-                    f"Raw FAULT line: {fault_line!r}",
-                )
-            if not instruction:
-                instruction = raw_error[:200]
-
-            _diag(workspace, "error_distiller", f"Classifier reasoning: {reasoning}")
-
-            next_node = {"tests": "test_writer", "spec": "architect_node"}.get(
-                fault_type, "code_writer"
-            )
-
-        except Exception:
-            instruction = raw_error[:300]
-            next_node = "code_writer"
-            fault_type = "unknown"
+        next_node = {"tests": "test_writer", "spec": "architect_node"}.get(
+            fault_type, "code_writer"
+        )
 
     _diag(
         workspace,
@@ -1292,28 +1326,20 @@ def archivist_node(state: SwarmState):
     )
     prompt = f"Current Ledger:\n{ledger}\n\nContract:\n{contract}"
 
-    try:
-        res = get_llm("archivist_node").invoke(
-            [SystemMessage(content=system), HumanMessage(content=prompt)]
-        )
-        updated_ledger = (ledger + "\n\n" + res.content).strip()
-        _diag(workspace, "archivist_node", f"Ledger entry:\n{res.content}")
-        if workspace:
-            with open(os.path.join(workspace, ".architecture.md"), "w") as f:
-                f.write(updated_ledger)
-        return {
-            "architecture_ledger": updated_ledger,
-            "next_node": "FINISH",
-            "thoughts": _think(
-                workspace, "archivist_node", "Archived plan to .architecture.md"
-            ),
-        }
-    except Exception as e:
-        import sys
-        print(f"[archivist_node] archive failed: {e}", file=sys.stderr)
-        return {
-            "next_node": "FINISH",
-            "thoughts": _think(
-                workspace, "archivist_node", f"Archive failed — {str(e)[:80]}"
-            ),
-        }
+    res = _invoke_with_retry(
+        "archivist_node",
+        [SystemMessage(content=system), HumanMessage(content=prompt)],
+        workspace,
+    )
+    updated_ledger = (ledger + "\n\n" + res).strip()
+    _diag(workspace, "archivist_node", f"Ledger entry:\n{res}")
+    if workspace:
+        with open(os.path.join(workspace, ".architecture.md"), "w") as f:
+            f.write(updated_ledger)
+    return {
+        "architecture_ledger": updated_ledger,
+        "next_node": "FINISH",
+        "thoughts": _think(
+            workspace, "archivist_node", "Archived plan to .architecture.md"
+        ),
+    }
