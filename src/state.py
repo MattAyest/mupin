@@ -1,5 +1,5 @@
 from operator import add
-from typing import Annotated, Any, Dict, List, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 
 class SwarmState(TypedDict):
@@ -23,3 +23,21 @@ class SwarmState(TypedDict):
     thoughts: Annotated[
         List[str], add
     ]  # short per-node log lines; accumulated via reducer
+    # ------------------------------------------------------------------
+    # Diagnostics: per-node timing, LLM token/time estimates, classifier
+    # details, and Docker phase timings. Optional so old state serializes.
+    # ------------------------------------------------------------------
+    node_history: Annotated[
+        List[Dict[str, Any]], add
+    ]  # one entry per node execution (name, start/end/duration, plus node-specific metrics)
+    llm_usage: Annotated[
+        List[Dict[str, Any]], add
+    ]  # one entry per LLM invocation (node, attempt, timing, estimated tokens, error)
+    docker_runs: Annotated[
+        List[Dict[str, Any]], add
+    ]  # one entry per deterministic_verifier run (install/test timing, pytest summary)
+    classifier_history: Annotated[
+        List[Dict[str, Any]], add
+    ]  # one entry per error_distiller classification (raw response, parsed fault, instruction)
+    python_version: Optional[str]
+    initial_prompt: Optional[str]

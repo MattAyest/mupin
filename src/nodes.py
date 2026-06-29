@@ -6,9 +6,11 @@ import shutil
 import socket
 import subprocess
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from datetime import datetime, timezone
 from functools import lru_cache
 
+import httpx
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -21,12 +23,22 @@ class LLMUnavailableError(Exception):
     This is an infrastructure fault, not a code/test/spec fault. It is surfaced
     as a terminal failure so the run is not silently scored as a code-quality
     issue and the operator sees a clear message.
+
+    Carries the usage entries from every failed attempt so diagnostics aren't
+    lost when a node fails.
     """
 
-    def __init__(self, node_name: str, attempts: int, cause: Exception):
+    def __init__(
+        self,
+        node_name: str,
+        attempts: int,
+        cause: Exception,
+        usage_entries: list[dict] | None = None,
+    ):
         self.node_name = node_name
         self.attempts = attempts
         self.cause = cause
+        self.usage_entries = usage_entries or []
         super().__init__(
             f"LLM for node '{node_name}' failed after {attempts} attempt(s): {cause}"
         )
@@ -38,6 +50,11 @@ with open(CONFIG_PATH, "r") as f:
 
 # Ollama Cloud is reached over the public API host with bearer auth.
 OLLAMA_CLOUD_HOST = "https://ollama.com"
+
+# Shared httpx timeout for Ollama clients. These are per-operation bounds
+# (connect/read/write/pool); the real wall-clock cap comes from
+# _invoke_with_retry's future.result(timeout=...).
+OLLAMA_TIMEOUT = httpx.Timeout(connect=15, read=180, write=15, pool=15)
 
 SUPPORTED_PROVIDERS = (
     "google-genai",
@@ -106,27 +123,32 @@ def _build_llm(node_name):
             anthropic_api_key=require_key("ANTHROPIC_API_KEY"),
         )
 
-    if provider == "ollama-cloud":
+    if provider in ("ollama-cloud", "ollama"):
         from langchain_ollama import ChatOllama
 
-        key = require_key("OLLAMA_API_KEY")
+        if provider == "ollama-cloud":
+            base_url = OLLAMA_CLOUD_HOST
+            key = require_key("OLLAMA_API_KEY")
+            client_kwargs = {
+                "headers": {"Authorization": f"Bearer {key}"},
+                "timeout": OLLAMA_TIMEOUT,
+            }
+        else:
+            # Local / self-hosted Ollama daemon.
+            # api_key_env_var (if any) names the base-URL env var.
+            base_url = os.getenv(
+                api_key_env_var or "OLLAMA_BASE_URL", "http://localhost:11434"
+            )
+            client_kwargs = {"timeout": OLLAMA_TIMEOUT}
+
         return ChatOllama(
             model=model,
             temperature=temperature,
-            base_url=OLLAMA_CLOUD_HOST,
-            client_kwargs={"headers": {"Authorization": f"Bearer {key}"}},
-            request_timeout=300,
+            base_url=base_url,
+            streaming=False,
+            disable_streaming=True,
+            client_kwargs=client_kwargs,
         )
-
-    if provider == "ollama":
-        # Local / self-hosted Ollama daemon.
-        # api_key_env_var (if any) names the base-URL env var.
-        from langchain_ollama import ChatOllama
-
-        base_url = os.getenv(
-            api_key_env_var or "OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        return ChatOllama(model=model, temperature=temperature, base_url=base_url)
 
     if provider == "openai-compatible":
         # Any self-hosted server speaking the OpenAI API (vLLM, LocalAI,
@@ -185,6 +207,27 @@ REPLAN_CEILING = CONFIG["loop_limits"]["max_replan_count"]
 SERVER_TASK_DEADLINE = CONFIG.get("server", {}).get("task_deadline_seconds", 3600)
 
 
+def _node_history_entry(
+    node_name: str,
+    wall_started: float,
+    wall_ended: float,
+    perf_duration: float | None = None,
+    **extras,
+) -> dict:
+    """Build a node_history record.
+
+    wall_* are Unix timestamps for absolute timing; perf_duration is the
+    high-resolution elapsed time for accurate durations.
+    """
+    return {
+        "node": node_name,
+        "started_at": datetime.fromtimestamp(wall_started, tz=timezone.utc).isoformat(),
+        "ended_at": datetime.fromtimestamp(wall_ended, tz=timezone.utc).isoformat(),
+        "duration_seconds": round(perf_duration, 3) if perf_duration is not None else round(wall_ended - wall_started, 3),
+        **extras,
+    }
+
+
 # ---------------------------------------------------------
 # HELPER: Unified thought logger.
 # Each node calls this with a short one-line summary of what it
@@ -217,40 +260,176 @@ def _diag(workspace: str, node: str, detail: str) -> None:
         print(f"[_diag] write failed for {workspace}: {e}", file=sys.stderr)
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough, fast token estimate for diagnostics only.
+
+    Uses ~4 chars per token for code-like text and ~0.75 words per token for
+    English prose. Diagnostics don't need exact counts; this is cheap and
+    cross-provider.
+    """
+    if not text:
+        return 0
+    # Blend heuristic: count whitespace-separated words plus punctuation chunks.
+    # For mostly-ASCII code this lands in the right ballpark.
+    return max(1, int(len(text) / 3.5))
+
+
+def _count_message_tokens(messages) -> int:
+    """Approximate input tokens from a list of LangChain messages."""
+    total = 0
+    for m in messages:
+        content = getattr(m, "content", "")
+        if isinstance(content, str):
+            total += _estimate_tokens(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total += _estimate_tokens(part.get("text", ""))
+                else:
+                    total += _estimate_tokens(str(part))
+    return total
+
+
 def _invoke_with_retry(
     node_name: str,
     messages,
     workspace: str = "",
     max_attempts: int = 3,
-    backoff_seconds: float = 2.0,
-):
-    """Call a node's LLM, retrying on transient errors (network drops, SSL EOF,
-    incomplete reads, provider 5xx).
+    timeout_seconds: float = 900.0,
+) -> tuple[str, list[dict]]:
+    """Call a node's LLM with a hard per-attempt timeout, retrying on transient
+    errors (network drops, SSL EOF, incomplete reads, provider 5xx, slow streams).
 
     These are infrastructure faults, not problems with the prompt or the code, so
     retrying at the source keeps them from cascading into the fault classifier as
     a false 'implementation' fault.
 
-    Returns the response content string. If all attempts fail, raises
-    LLMUnavailableError so the task fails fast with a clear message.
+    Returns a tuple of (response_content, llm_usage_entries). If all attempts
+    fail, raises LLMUnavailableError so the task fails fast with a clear message.
+    The usage entries are returned so the caller can emit them via the state
+    reducer (avoiding in-place mutation of the state list).
     """
+    node_config = CONFIG.get("nodes", {}).get(node_name, {})
+    provider = node_config.get("provider")
+    model = node_config.get("model", "unknown")
+    # Ollama's streaming endpoint is the source of incomplete-chunk hangs; force
+    # non-streaming invocations for both hosted and local Ollama.
+    ollama_providers = ("ollama-cloud", "ollama")
+    invoke_kwargs = {"stream": False} if provider in ollama_providers else {}
+
+    input_tokens = _count_message_tokens(messages)
+    usage_entries: list[dict] = []
     last_error: Exception | None = None
+
     for attempt in range(1, max_attempts + 1):
+        started = time.perf_counter()
         try:
-            response = get_llm(node_name).invoke(messages)
-            return response.content if hasattr(response, "content") else ""
+            llm = get_llm(node_name)
+
+            def _call():
+                response = llm.invoke(messages, **invoke_kwargs)
+                content = response.content if hasattr(response, "content") else ""
+                # Capture provider metadata when available (Ollama native response).
+                metadata = getattr(response, "response_metadata", {}) or {}
+                return content, metadata
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call)
+                content, metadata = future.result(timeout=timeout_seconds)
+
+            elapsed = time.perf_counter() - started
+            # Prefer provider-reported token counts when available; fall back to
+            # the heuristic estimate for providers that don't report them.
+            output_tokens = _estimate_tokens(content)
+            prompt_tokens = metadata.get("prompt_eval_count") if isinstance(metadata, dict) else None
+            completion_tokens = metadata.get("eval_count") if isinstance(metadata, dict) else None
+            if isinstance(prompt_tokens, (int, float)) and prompt_tokens > 0:
+                input_tokens = int(prompt_tokens)
+            if isinstance(completion_tokens, (int, float)) and completion_tokens > 0:
+                output_tokens = int(completion_tokens)
+            # Provider duration is in nanoseconds; keep our wall-clock duration too.
+            provider_duration_ns = metadata.get("total_duration") if isinstance(metadata, dict) else None
+            provider_duration = (
+                round(provider_duration_ns / 1_000_000_000, 3)
+                if isinstance(provider_duration_ns, (int, float)) and provider_duration_ns > 0
+                else None
+            )
+            usage = {
+                "node": node_name,
+                "model": model,
+                "provider": provider,
+                "attempt": attempt,
+                "status": "success",
+                "duration_seconds": round(elapsed, 3),
+                "provider_duration_seconds": provider_duration,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "error": None,
+                "response_metadata": metadata,
+            }
+            usage_entries.append(usage)
+            if workspace:
+                _diag(
+                    workspace,
+                    node_name,
+                    f"LLM success attempt {attempt}/{max_attempts}: "
+                    f"{usage['duration_seconds']}s, "
+                    f"~{usage['total_tokens']} tokens "
+                    f"(in={usage['input_tokens']}, out={usage['output_tokens']})",
+                )
+            return content, usage_entries
+        except FutureTimeoutError as e:
+            last_error = e
+            elapsed = time.perf_counter() - started
+            usage_entries.append({
+                "node": node_name,
+                "model": model,
+                "provider": provider,
+                "attempt": attempt,
+                "status": "wallclock_timeout",
+                "duration_seconds": round(elapsed, 3),
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                "total_tokens": input_tokens,
+                "error": f"Wall-clock timeout after {timeout_seconds}s",
+                "response_metadata": {},
+            })
+            if workspace:
+                _diag(
+                    workspace,
+                    node_name,
+                    f"LLM attempt {attempt}/{max_attempts} timed out after {timeout_seconds}s",
+                )
         except Exception as e:
             last_error = e
+            elapsed = time.perf_counter() - started
+            usage_entries.append({
+                "node": node_name,
+                "model": model,
+                "provider": provider,
+                "attempt": attempt,
+                "status": "error",
+                "duration_seconds": round(elapsed, 3),
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                "total_tokens": input_tokens,
+                "error": f"{type(e).__name__}: {e}",
+                "response_metadata": {},
+            })
             if workspace:
                 _diag(
                     workspace,
                     node_name,
                     f"LLM attempt {attempt}/{max_attempts} failed: {type(e).__name__}: {e}",
                 )
-            if attempt < max_attempts:
-                time.sleep(backoff_seconds)
+        if attempt < max_attempts:
+            # Escalating backoff: give a slow/overloaded endpoint time to recover
+            # between attempts without making fast failures wait forever.
+            backoff = (2.0, 5.0, 15.0)[attempt - 1]
+            time.sleep(backoff)
 
-    raise LLMUnavailableError(node_name, max_attempts, last_error) from last_error
+    raise LLMUnavailableError(node_name, max_attempts, last_error, usage_entries) from last_error
 
 
 # ---------------------------------------------------------
@@ -284,9 +463,36 @@ def resolve_host_path(container_path: str) -> str:
     return abs_path
 
 
+def node_with_history(func):
+    """Decorator that records node entry/exit timing and node-specific extras.
+
+    The wrapped function may return a dict containing a 'diagnostics' key;
+    that key is merged into the node_history entry and removed from the state
+    update so LangGraph never sees it. The node_history entry is returned via
+    the state reducer so it accumulates across the graph run.
+    """
+
+    def wrapper(state: SwarmState):
+        node_name = func.__name__
+        wall_started = time.time()
+        perf_started = time.perf_counter()
+        result = func(state) or {}
+        perf_ended = time.perf_counter()
+        wall_ended = time.time()
+        extras = result.pop("diagnostics", {}) if isinstance(result, dict) else {}
+        entry = _node_history_entry(
+            node_name, wall_started, wall_ended, perf_ended - perf_started, **extras
+        )
+        result["node_history"] = [entry]
+        return result
+
+    return wrapper
+
+
 # ---------------------------------------------------------
 # NODE: WORKSPACE LOADER
 # ---------------------------------------------------------
+@node_with_history
 def workspace_loader(state: SwarmState):
     workspace = state.get("workspace_dir", ".workspaces/default")
     os.makedirs(workspace, exist_ok=True)
@@ -307,6 +513,7 @@ def workspace_loader(state: SwarmState):
 # On retry from error_distiller (fault=spec), receives prior context
 # and revises the contract.
 # ---------------------------------------------------------
+@node_with_history
 def architect_node(state: SwarmState):
     prompt = state.get("messages", [])[-1].content
     feedback = state.get("verification_errors", "")
@@ -343,7 +550,7 @@ def architect_node(state: SwarmState):
             f"\n\nRun failed with spec fault — revise the contract:\n{feedback}"
         )
 
-    content = _invoke_with_retry(
+    content, llm_usage = _invoke_with_retry(
         "architect_node",
         [SystemMessage(content=system), HumanMessage(content=user_prompt)],
         state.get("workspace_dir", ""),
@@ -379,6 +586,7 @@ def architect_node(state: SwarmState):
         # failed approaches are still carried forward as "avoid" guidance.
         "file_manifest": {},
         "verification_errors": "",
+        "llm_usage": llm_usage,
         "next_node": "test_writer",
         "thoughts": _think(ws, "architect_node", thought),
     }
@@ -391,6 +599,7 @@ def architect_node(state: SwarmState):
 # On retry from error_distiller (fault=tests), receives the prior
 # verification error as context to revise specific tests.
 # ---------------------------------------------------------
+@node_with_history
 def test_writer(state: SwarmState):
     contract = state.get("interface_contract", "")
     errors = state.get("verification_errors", "")
@@ -491,7 +700,7 @@ def test_writer(state: SwarmState):
         )
 
     try:
-        content = _invoke_with_retry(
+        content, llm_usage = _invoke_with_retry(
             "test_writer",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             state.get("workspace_dir", ""),
@@ -528,6 +737,7 @@ def test_writer(state: SwarmState):
         }
         return {
             "file_manifest": {**src_files, **test_files},
+            "llm_usage": llm_usage,
             "next_node": "contract_verifier",
             "thoughts": _think(
                 ws,
@@ -538,8 +748,12 @@ def test_writer(state: SwarmState):
         }
 
     except Exception as e:
+        # LLM outages must fail fast, not be misclassified as test bugs.
+        if isinstance(e, LLMUnavailableError):
+            raise
         return {
             "verification_errors": f"Test Writer Error: {str(e)}",
+            "llm_usage": llm_usage if 'llm_usage' in locals() else [],
             "next_node": "error_distiller",
             "thoughts": _think(
                 state.get("workspace_dir", ""), "test_writer", f"ERROR: {str(e)[:100]}"
@@ -555,6 +769,7 @@ def test_writer(state: SwarmState):
 # Loop-guarded: after 3 failed checks it proceeds anyway to avoid
 # an infinite test_writer loop.
 # ---------------------------------------------------------
+@node_with_history
 def contract_verifier(state: SwarmState):
     contract = state.get("interface_contract", "")
     manifest = state.get("file_manifest", {})
@@ -599,17 +814,19 @@ def contract_verifier(state: SwarmState):
     user_prompt = f"Contract:\n{contract}\n\nTest Suite:\n{test_context}"
 
     ws = state.get("workspace_dir", "")
-    verdict = _invoke_with_retry(
+    verdict, llm_usage = _invoke_with_retry(
         "contract_verifier",
         [SystemMessage(content=system), HumanMessage(content=user_prompt)],
         ws,
-    ).strip()
+    )
+    verdict = verdict.strip()
     _diag(ws, "contract_verifier", f"Verdict (attempt {check_count}/3):\n{verdict}")
 
     if verdict.upper().startswith("PASS"):
         return {
             "contract_check_count": check_count,
             "verification_errors": "",
+            "llm_usage": llm_usage,
             "next_node": proceed_node,
             "thoughts": _think(
                 ws,
@@ -625,6 +842,7 @@ def contract_verifier(state: SwarmState):
         return {
             "contract_check_count": check_count,
             "verification_errors": "",
+            "llm_usage": llm_usage,
             "next_node": proceed_node,
             "thoughts": _think(
                 ws,
@@ -636,6 +854,7 @@ def contract_verifier(state: SwarmState):
     return {
         "contract_check_count": check_count,
         "verification_errors": verdict,
+        "llm_usage": llm_usage,
         "next_node": "test_writer",
         "thoughts": _think(
             ws,
@@ -651,6 +870,7 @@ def contract_verifier(state: SwarmState):
 # Writes only src/ files and requirements.txt — never test files.
 # On retry the tests are frozen; only the implementation changes.
 # ---------------------------------------------------------
+@node_with_history
 def code_writer(state: SwarmState):
     prompt = state.get("messages", [])[-1].content
     plan = state.get("architectural_plan", "")
@@ -715,17 +935,19 @@ def code_writer(state: SwarmState):
 
     ws = state.get("workspace_dir", "")
 
-    content = _invoke_with_retry(
+    content, llm_usage = _invoke_with_retry(
         "code_writer",
         [SystemMessage(content=system), HumanMessage(content=user_prompt)],
         ws,
     )
 
     new_files = {}
-    matches = re.finditer(
-        r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
-        content,
-        re.DOTALL | re.IGNORECASE,
+    matches = list(
+        re.finditer(
+            r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
     )
     for match in matches:
         code = match.group(2).strip()
@@ -736,10 +958,19 @@ def code_writer(state: SwarmState):
 
     if not new_files:
         # This is a formatting/content problem, not an LLM outage — route to
-        # error_distiller so the loop can recover.
+        # error_distiller so the loop can recover. Log the raw response so we
+        # can diagnose parse failures.
         err = "Code Writer Error: Failed XML formatting."
+        _diag(
+            ws,
+            "code_writer",
+            f"XML parse debug: len(content)={len(content)}, matches={len(matches)}, "
+            f"all_filenames={[m.group(1).strip() for m in matches]}, "
+            f"raw_response:\n{content[:4000]}",
+        )
         return {
             "verification_errors": err,
+            "llm_usage": llm_usage,
             "next_node": "error_distiller",
             "thoughts": _think(ws, "code_writer", err),
         }
@@ -753,6 +984,7 @@ def code_writer(state: SwarmState):
     test_files = {k: v for k, v in manifest.items() if k.startswith("tests/")}
     return {
         "file_manifest": {**test_files, **new_files},
+        "llm_usage": llm_usage,
         "next_node": "static_analyzer",
         "thoughts": _think(
             ws,
@@ -766,6 +998,7 @@ def code_writer(state: SwarmState):
 # ---------------------------------------------------------
 # NODE: STATIC ANALYZER
 # ---------------------------------------------------------
+@node_with_history
 def static_analyzer(state: SwarmState):
     manifest = state.get("file_manifest", {})
     errors = []
@@ -807,6 +1040,7 @@ def static_analyzer(state: SwarmState):
 #   Phase 1 — install deps (network on, no user code runs)
 #   Phase 2 — run pytest (network off, user code executes)
 # ---------------------------------------------------------
+@node_with_history
 def deterministic_verifier(state: SwarmState):
     workspace = state.get("workspace_dir", ".workspaces/default")
     manifest = state.get("file_manifest", {})
@@ -904,16 +1138,43 @@ def deterministic_verifier(state: SwarmState):
         + [IMAGE, "python", "-m", "pytest", "-p", "no:cacheprovider"]
     )
 
+    def _docker_run_record(install_rc, install_duration, test_rc, test_duration, summary, first_fail, stdout, stderr):
+        return {
+            "loop": loops,
+            "install_returncode": install_rc,
+            "install_duration_seconds": round(install_duration, 3) if install_duration is not None else None,
+            "test_returncode": test_rc,
+            "test_duration_seconds": round(test_duration, 3) if test_duration is not None else None,
+            "pytest_summary": summary,
+            "first_failure": first_fail,
+            "stdout_tail": stdout[-2000:],
+            "stderr_tail": stderr[-1000:],
+        }
+
     try:
+        install_started = time.perf_counter()
         install_res = subprocess.run(
             install_cmd, capture_output=True, text=True, timeout=timeout_install
         )
+        install_duration = time.perf_counter() - install_started
         if install_res.returncode != 0:
             install_error = f"DEPENDENCY INSTALL FAILED:\nSTDOUT:\n{install_res.stdout}\nSTDERR:\n{install_res.stderr}"
             _diag(workspace, "deterministic_verifier", install_error)
             return {
                 "verification_errors": install_error,
                 "loop_count": loops,
+                "docker_runs": [
+                    _docker_run_record(
+                        install_res.returncode,
+                        install_duration,
+                        None,
+                        None,
+                        "dep install failed",
+                        "",
+                        install_res.stdout,
+                        install_res.stderr,
+                    )
+                ],
                 "next_node": "error_distiller" if loops < LOOP_CEILING else "FINISH",
                 "thoughts": _think(
                     workspace,
@@ -922,9 +1183,11 @@ def deterministic_verifier(state: SwarmState):
                 ),
             }
 
+        test_started = time.perf_counter()
         res = subprocess.run(
             test_cmd, capture_output=True, text=True, timeout=timeout_test
         )
+        test_duration = time.perf_counter() - test_started
 
         if res.returncode == 0:
             # Tests passed — route through error_distiller for semantic contract validation before archiving
@@ -933,6 +1196,18 @@ def deterministic_verifier(state: SwarmState):
                 "loop_count": loops,
                 "verification_errors": "",
                 "regression_count": 0,
+                "docker_runs": [
+                    _docker_run_record(
+                        install_res.returncode,
+                        install_duration,
+                        res.returncode,
+                        test_duration,
+                        "passed",
+                        "",
+                        res.stdout,
+                        res.stderr,
+                    )
+                ],
                 "next_node": "error_distiller",
                 "thoughts": _think(
                     workspace, "deterministic_verifier", f"Loop {loops}: tests PASSED"
@@ -985,6 +1260,19 @@ def deterministic_verifier(state: SwarmState):
         return {
             "verification_errors": f"{error_prefix}STDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}",
             "loop_count": loops,
+            "docker_runs": [
+                _docker_run_record(
+                    install_res.returncode,
+                    install_duration,
+                    res.returncode,
+                    test_duration,
+                    fail_summary,
+                    first_fail,
+                    res.stdout,
+                    res.stderr,
+                )
+            ],
+            "diagnostics": {"pytest_summary": fail_summary, "first_failure": first_fail},
             "next_node": "error_distiller" if loops < LOOP_CEILING else "FINISH",
             "thoughts": _think(
                 workspace,
@@ -997,6 +1285,18 @@ def deterministic_verifier(state: SwarmState):
         return {
             "verification_errors": f"Execution Error: Test suite timed out ({timeout_test}s). Infinite loop or heavy fuzzing detected.",
             "loop_count": loops,
+            "docker_runs": [
+                _docker_run_record(
+                    0,
+                    None,
+                    None,
+                    timeout_test,
+                    "timeout",
+                    "",
+                    "",
+                    f"subprocess.TimeoutExpired after {timeout_test}s",
+                )
+            ],
             "next_node": "error_distiller" if loops < LOOP_CEILING else "FINISH",
             "thoughts": _think(
                 workspace,
@@ -1026,6 +1326,7 @@ def deterministic_verifier(state: SwarmState):
 #   regression_count >= REGRESSION_CEILING → force architect replan
 #   replan_count     >= REPLAN_CEILING     → terminate
 # ---------------------------------------------------------
+@node_with_history
 def error_distiller(state: SwarmState):
     raw_error = state.get("verification_errors", "")
     graveyard = list(state.get("rollback_graveyard", []))
@@ -1060,16 +1361,27 @@ def error_distiller(state: SwarmState):
         )
         user_prompt = f"Contract:\n{contract}\n\nImplementation:\n{impl_context}"
 
-        verdict = _invoke_with_retry(
+        verdict_raw, llm_usage = _invoke_with_retry(
             "error_distiller",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
-        ).strip()
+        )
+        verdict = verdict_raw.strip()
         _diag(workspace, "error_distiller", f"Semantic verdict:\n{verdict}")
 
+        semantic_record = {
+            "mode": "semantic",
+            "verdict": verdict,
+            "fault": None,
+            "instruction": None,
+            "regression_count": regression_count,
+            "replan_count": replan_count,
+        }
         if verdict.upper().startswith("PASS"):
             return {
                 "verification_errors": "",
+                "llm_usage": llm_usage,
+                "classifier_history": [semantic_record],
                 "next_node": "archivist_node",
                 "thoughts": _think(
                     workspace, "error_distiller", "Semantic validation PASS — archiving"
@@ -1086,6 +1398,7 @@ def error_distiller(state: SwarmState):
         graveyard.append(verdict[-500:])
         new_regression_count = regression_count + 1
 
+        semantic_record.update({"fault": "implementation", "instruction": instruction})
         if new_regression_count >= REGRESSION_CEILING:
             if replan_count >= REPLAN_CEILING:
                 return {
@@ -1093,6 +1406,8 @@ def error_distiller(state: SwarmState):
                     "rollback_graveyard": graveyard,
                     "regression_count": new_regression_count,
                     "replan_count": replan_count,
+                    "llm_usage": llm_usage,
+                    "classifier_history": [semantic_record],
                     "next_node": "FINISH",
                     "thoughts": _think(
                         workspace,
@@ -1105,6 +1420,8 @@ def error_distiller(state: SwarmState):
                 "rollback_graveyard": graveyard,
                 "regression_count": 0,
                 "replan_count": replan_count + 1,
+                "llm_usage": llm_usage,
+                "classifier_history": [semantic_record],
                 "next_node": "architect_node",
                 "thoughts": _think(
                     workspace,
@@ -1117,6 +1434,8 @@ def error_distiller(state: SwarmState):
             "verification_errors": instruction,
             "rollback_graveyard": graveyard,
             "regression_count": new_regression_count,
+            "llm_usage": llm_usage,
+            "classifier_history": [semantic_record],
             "next_node": "code_writer",
             "thoughts": _think(
                 workspace,
@@ -1145,13 +1464,21 @@ def error_distiller(state: SwarmState):
         f"Error trace (last 500 chars):\n{raw_error[-500:]}",
     )
 
+    classifier_record_base = {
+        "mode": "fault_classification",
+        "regression_count": regression_count,
+        "replan_count": replan_count,
+    }
+
     if regression_count >= REGRESSION_CEILING:
+        ceiling_record = {**classifier_record_base, "fault": "ceiling", "instruction": "regression/replan ceiling reached"}
         if replan_count >= REPLAN_CEILING:
             return {
                 "verification_errors": f"Exhausted {REPLAN_CEILING} architect replans without success.",
                 "rollback_graveyard": graveyard,
                 "regression_count": regression_count,
                 "replan_count": replan_count,
+                "classifier_history": [ceiling_record],
                 "next_node": "FINISH",
                 "thoughts": _think(
                     workspace,
@@ -1164,6 +1491,7 @@ def error_distiller(state: SwarmState):
             "rollback_graveyard": graveyard,
             "regression_count": 0,
             "replan_count": replan_count + 1,
+            "classifier_history": [ceiling_record],
             "next_node": "architect_node",
             "thoughts": _think(
                 workspace,
@@ -1177,6 +1505,13 @@ def error_distiller(state: SwarmState):
         fault_type = "syntax"
         instruction = raw_error[:300]
         next_node = "code_writer"
+        classifier_record = {
+            **classifier_record_base,
+            "raw_response": None,
+            "reasoning": "STATIC ANALYSIS FAILED short-circuit",
+            "fault": fault_type,
+            "instruction": instruction,
+        }
     else:
         system = (
             "You are the fault classifier in a TDD pipeline.\n"
@@ -1203,11 +1538,12 @@ def error_distiller(state: SwarmState):
 
         VALID_FAULTS = ("implementation", "tests", "spec")
 
-        verdict = _invoke_with_retry(
+        verdict_raw, llm_usage = _invoke_with_retry(
             "error_distiller",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
-        ).strip()
+        )
+        verdict = verdict_raw.strip()
         _diag(workspace, "error_distiller", f"Raw classifier response:\n{verdict}")
         lines = verdict.strip().splitlines()
 
@@ -1251,6 +1587,13 @@ def error_distiller(state: SwarmState):
         next_node = {"tests": "test_writer", "spec": "architect_node"}.get(
             fault_type, "code_writer"
         )
+        classifier_record = {
+            **classifier_record_base,
+            "raw_response": verdict,
+            "reasoning": reasoning,
+            "fault": fault_type,
+            "instruction": instruction,
+        }
 
     _diag(
         workspace,
@@ -1272,6 +1615,7 @@ def error_distiller(state: SwarmState):
             "rollback_graveyard": graveyard,
             "regression_count": regression_count,
             "replan_count": new_replan_count,
+            "classifier_history": [classifier_record],
             "next_node": "FINISH",
             "thoughts": _think(
                 workspace,
@@ -1285,6 +1629,8 @@ def error_distiller(state: SwarmState):
         "rollback_graveyard": graveyard,
         "regression_count": regression_count,
         "replan_count": new_replan_count,
+        "classifier_history": [classifier_record],
+        "diagnostics": {"fault": fault_type, "route": next_node, "mode": "fault_classification"},
         "next_node": next_node,
         "thoughts": _think(
             workspace,
@@ -1299,6 +1645,7 @@ def error_distiller(state: SwarmState):
 # On success, summarises the plan and contract into a ledger entry,
 # appends it to the in-state ledger, and writes it to disk.
 # ---------------------------------------------------------
+@node_with_history
 def archivist_node(state: SwarmState):
     workspace = state.get("workspace_dir", "")
     plan = state.get("architectural_plan", "")
@@ -1326,7 +1673,7 @@ def archivist_node(state: SwarmState):
     )
     prompt = f"Current Ledger:\n{ledger}\n\nContract:\n{contract}"
 
-    res = _invoke_with_retry(
+    res, llm_usage = _invoke_with_retry(
         "archivist_node",
         [SystemMessage(content=system), HumanMessage(content=prompt)],
         workspace,
@@ -1338,6 +1685,7 @@ def archivist_node(state: SwarmState):
             f.write(updated_ledger)
     return {
         "architecture_ledger": updated_ledger,
+        "llm_usage": llm_usage,
         "next_node": "FINISH",
         "thoughts": _think(
             workspace, "archivist_node", "Archived plan to .architecture.md"

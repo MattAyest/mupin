@@ -37,7 +37,7 @@ error_distiller ──► code_writer  (impl)     │
 
 1. **Architect** acts as a systems/data engineer: defines the architectural shape and a precise behavioral contract (signatures, return guarantees, raise-rules stated as rules rather than enumerated lists).
 2. **Test writer** writes a pytest suite that verifies the contract — never sees the implementation. Imports from `src.main`.
-3. **Contract verifier** checks (cheaply) that the tests faithfully reflect what the contract explicitly states; retries up to 3 times. All LLM nodes share a small retry wrapper (`_invoke_with_retry`) for transient provider errors; if retries are exhausted, the task fails fast with a clear `failed` status instead of silently proceeding with bad output.
+3. **Contract verifier** checks (cheaply) that the tests faithfully reflect what the contract explicitly states; retries up to 3 times. All LLM nodes share a small retry wrapper (`_invoke_with_retry`) for transient provider errors. The wrapper enforces a hard per-attempt wall-clock timeout (15 minutes by default), disables streaming for Ollama endpoints to avoid incomplete-chunk hangs, and uses escalating backoff between attempts. If retries are exhausted, the task fails fast with a clear `failed` status instead of silently proceeding with bad output.
 4. **Code writer** implements the contract (not the tests) in `src/main.py` — correct behavior makes the tests pass as a consequence.
 5. **Static analyzer** catches syntax errors deterministically before running Docker.
 6. **Deterministic verifier** installs deps and runs pytest inside a hardened `python:3.11-slim` sibling container (network disabled during test run).
@@ -126,6 +126,28 @@ curl http://localhost:8000/task/<task_id>/log
 
 Plain-text one-liner per node action — good for tailing progress. Detailed diagnostic content (LLM responses, pytest output) is written to `.workspaces/<task_id>/task.log`.
 
+### Observability and diagnostics
+
+Every task records a full telemetry trace:
+
+- `node_history`: entry/exit wall-clock time and duration for each graph node.
+- `llm_usage`: one entry per LLM attempt with model, provider, status, wall-clock duration,
+  provider-reported duration (when available), input/output token counts, and the raw
+  `response_metadata`.
+- `docker_runs`: per-verifier Docker run with install/test phase durations, return code,
+  pytest summary, first failure, and stdout/stderr tails.
+- `classifier_history`: every `error_distiller` fault/semantic classification, including the
+  raw response, reasoning, parsed fault, instruction, and regression/replan counts.
+
+Fetch them with:
+```bash
+curl http://localhost:8000/task/<task_id>
+```
+
+The benchmark runner writes the same data to `benchmarks/results.jsonl` and a flattened
+`benchmarks/metrics.jsonl`. Run with `--diagnostics` to print a per-node token/time summary
+after the run.
+
 **Generated files on disk:**
 ```
 .workspaces/<task_id>/
@@ -140,7 +162,9 @@ Plain-text one-liner per node action — good for tailing progress. Detailed dia
 
 ## Configuration
 
-`llm_config.yaml` controls per-node models, loop limits, and Docker sandbox settings. It is mounted read-only — changes take effect on the next task without a rebuild.
+`llm_config.yaml` controls per-node models, loop limits, and Docker sandbox settings. It is mounted read-only — changes take effect on the next task without a rebuild. Changes to `src/` require `docker compose up --build -d` because the source is copied into the image at build time.
+
+Diagnostic telemetry (node timing, LLM token/time estimates, Docker phase timings, and fault-classifier history) is exposed on `GET /task/{task_id}` in the `node_history`, `llm_usage`, `docker_runs`, and `classifier_history` fields. The benchmark runner (`benchmarks/runner.py`) stores the same data in `benchmarks/results.jsonl` and a flattened `benchmarks/metrics.jsonl`; use `--diagnostics` for a per-run summary.
 
 ```yaml
 loop_limits:

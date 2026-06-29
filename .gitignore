@@ -18,6 +18,7 @@ env/
 
 # Benchmark run output (append-only history; runner.py + questions.json ARE tracked)
 benchmarks/results.jsonl
+benchmarks/metrics.jsonl
 benchmarks/*.out
 
 # Ollama data & models

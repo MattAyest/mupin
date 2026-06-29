@@ -49,6 +49,11 @@ class TaskStatusResponse(BaseModel):
     error: str | None = None
     latest_verification_error: str | None = None
     thoughts: List[str] = []
+    # Diagnostics exposed for benchmark/monitoring consumers.
+    node_history: List[Dict[str, Any]] = []
+    llm_usage: List[Dict[str, Any]] = []
+    docker_runs: List[Dict[str, Any]] = []
+    classifier_history: List[Dict[str, Any]] = []
 
 
 async def _drive_graph(task_id: str, initial_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,6 +86,14 @@ async def _drive_graph(task_id: str, initial_state: Dict[str, Any]) -> Dict[str,
                     final_manifest = state_update["file_manifest"]
                 if "thoughts" in state_update:
                     tasks_db[task_id]["thoughts"].extend(state_update["thoughts"])
+                if "node_history" in state_update:
+                    tasks_db[task_id]["node_history"].extend(state_update["node_history"])
+                if "llm_usage" in state_update:
+                    tasks_db[task_id]["llm_usage"].extend(state_update["llm_usage"])
+                if "docker_runs" in state_update:
+                    tasks_db[task_id]["docker_runs"].extend(state_update["docker_runs"])
+                if "classifier_history" in state_update:
+                    tasks_db[task_id]["classifier_history"].extend(state_update["classifier_history"])
     finally:
         # Ensure the async generator is closed promptly on cancel/deadline so a
         # node mid-flight doesn't keep running after we've stopped consuming.
@@ -93,6 +106,11 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
         "messages": [HumanMessage(content=prompt)],
         "workspace_dir": workspace_dir,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "initial_prompt": prompt,
+        "node_history": [],
+        "llm_usage": [],
+        "docker_runs": [],
+        "classifier_history": [],
     }
 
     try:
@@ -138,6 +156,9 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
         tasks_db[task_id]["status"] = "failed"
         tasks_db[task_id]["error"] = str(e)
         tasks_db[task_id]["result"] = None
+        # Preserve any diagnostic usage entries captured before the LLM failed.
+        if hasattr(e, "usage_entries"):
+            tasks_db[task_id]["llm_usage"].extend(getattr(e, "usage_entries", []))
     finally:
         running_tasks.pop(task_id, None)
 
@@ -164,6 +185,10 @@ async def generate_code(request: TaskRequest):
         "error": None,
         "latest_verification_error": None,
         "thoughts": [],
+        "node_history": [],
+        "llm_usage": [],
+        "docker_runs": [],
+        "classifier_history": [],
     }
 
     # Trigger the LangGraph execution as a tracked asyncio task so it can be

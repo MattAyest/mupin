@@ -23,6 +23,7 @@ import requests
 BASE_URL = os.environ.get("CODING_MODULE_URL", "http://localhost:8000")
 QUESTIONS_FILE = Path(__file__).parent / "questions.json"
 RESULTS_FILE = Path(__file__).parent / "results.jsonl"
+METRICS_FILE = Path(__file__).parent / "metrics.jsonl"
 
 POLL_INTERVAL = 5   # seconds between status polls
 TIMEOUT = 1200      # seconds before we give up on a single task (20 min)
@@ -70,6 +71,51 @@ def run_question(question: dict, run_id: str) -> dict:
     start_time = time.time()
     start_iso = datetime.now(timezone.utc).isoformat()
 
+    def _diagnostic_fields(data: dict):
+        return {
+            "node_history": data.get("node_history", []),
+            "llm_usage": data.get("llm_usage", []),
+            "docker_runs": data.get("docker_runs", []),
+            "classifier_history": data.get("classifier_history", []),
+            "latest_verification_error": data.get("latest_verification_error"),
+        }
+
+    def _metrics_rows(result: dict, diag: dict) -> list[dict]:
+        rows = []
+        for entry in diag.get("node_history", []):
+            rows.append({
+                "run_id": run_id,
+                "question_id": qid,
+                "task_id": result.get("task_id"),
+                "metric_type": "node",
+                "metric": entry,
+            })
+        for entry in diag.get("llm_usage", []):
+            rows.append({
+                "run_id": run_id,
+                "question_id": qid,
+                "task_id": result.get("task_id"),
+                "metric_type": "llm",
+                "metric": entry,
+            })
+        for entry in diag.get("docker_runs", []):
+            rows.append({
+                "run_id": run_id,
+                "question_id": qid,
+                "task_id": result.get("task_id"),
+                "metric_type": "docker",
+                "metric": entry,
+            })
+        for entry in diag.get("classifier_history", []):
+            rows.append({
+                "run_id": run_id,
+                "question_id": qid,
+                "task_id": result.get("task_id"),
+                "metric_type": "classifier",
+                "metric": entry,
+            })
+        return rows
+
     try:
         task_id = submit_task(question["prompt"])
     except Exception as e:
@@ -89,6 +135,11 @@ def run_question(question: dict, run_id: str) -> dict:
             "replan_count": 0,
             "files_generated": 0,
             "thoughts_count": 0,
+            "node_history": [],
+            "llm_usage": [],
+            "docker_runs": [],
+            "classifier_history": [],
+            "latest_verification_error": None,
         }
 
     print(f"  task_id={task_id}")
@@ -116,6 +167,7 @@ def run_question(question: dict, run_id: str) -> dict:
         if status in ("completed", "failed", "cancelled", "exhausted"):
             end_iso = datetime.now(timezone.utc).isoformat()
             files = data.get("result") or {}
+            diagnostics = _diagnostic_fields(data)
             result = {
                 "run_id": run_id,
                 "question_id": qid,
@@ -131,7 +183,9 @@ def run_question(question: dict, run_id: str) -> dict:
                 "replan_count": data.get("replan_count", 0),
                 "files_generated": len(files),
                 "thoughts_count": len(data.get("thoughts", [])),
+                **diagnostics,
             }
+            append_metrics(_metrics_rows(result, diagnostics))
             verdict = "PASS" if status == "completed" and files else "FAIL"
             print(f"\n  {verdict}  in {elapsed}s  |  loops={result['loop_count']}  regressions={result['regression_count']}  files={result['files_generated']}")
             return result
@@ -143,9 +197,10 @@ def run_question(question: dict, run_id: str) -> dict:
     cancel_task(task_id)
     end_iso = datetime.now(timezone.utc).isoformat()
     elapsed = round(time.time() - start_time, 1)
+    diagnostics = _diagnostic_fields(last_data)
     print(f"\n  TIMEOUT after {elapsed}s — cancelled "
           f"(last node={last_data.get('current_node')} loops={last_data.get('loop_count', 0)})")
-    return {
+    result = {
         "run_id": run_id,
         "question_id": qid,
         "difficulty": question["difficulty"],
@@ -160,12 +215,23 @@ def run_question(question: dict, run_id: str) -> dict:
         "replan_count": last_data.get("replan_count", 0),
         "files_generated": len(last_data.get("result") or {}),
         "thoughts_count": len(last_data.get("thoughts", [])),
+        **diagnostics,
     }
+    append_metrics(_metrics_rows(result, diagnostics))
+    return result
 
 
 def append_result(result: dict):
     with open(RESULTS_FILE, "a") as f:
         f.write(json.dumps(result) + "\n")
+
+
+def append_metrics(metrics: list[dict]):
+    if not metrics:
+        return
+    with open(METRICS_FILE, "a") as f:
+        for m in metrics:
+            f.write(json.dumps(m) + "\n")
 
 
 def print_summary(results: list[dict]):
@@ -188,6 +254,68 @@ def print_summary(results: list[dict]):
     print(f"{'─' * 70}")
     print(f"  {passed}/{len(results)} passed   total time: {total_elapsed:.1f}s   avg: {total_elapsed/len(results):.1f}s")
     print(f"{'═' * 70}\n")
+
+
+def print_diagnostics(results: list[dict]):
+    """Print a per-node token/time summary from the captured diagnostics."""
+    if not results:
+        return
+    print(f"\n{'#' * 70}")
+    print(f"  DIAGNOSTIC SUMMARY  ({results[0]['run_id']})")
+    print(f"{'#' * 70}")
+
+    # Aggregate LLM usage across all questions in this run.
+    node_totals: dict[str, dict] = {}
+    for r in results:
+        for entry in r.get("llm_usage", []):
+            node = entry["node"]
+            if node not in node_totals:
+                node_totals[node] = {
+                    "calls": 0,
+                    "errors": 0,
+                    "duration": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                }
+            node_totals[node]["calls"] += 1
+            if entry.get("status") != "success":
+                node_totals[node]["errors"] += 1
+            node_totals[node]["duration"] += entry.get("duration_seconds", 0) or 0
+            node_totals[node]["input_tokens"] += entry.get("input_tokens", 0) or 0
+            node_totals[node]["output_tokens"] += entry.get("output_tokens", 0) or 0
+            node_totals[node]["total_tokens"] += entry.get("total_tokens", 0) or 0
+
+    if node_totals:
+        print(f"\n  {'NODE':<22} {'CALLS':>5} {'ERRORS':>6} {'TIME':>8} {'IN_TOK':>8} {'OUT_TOK':>8} {'TOT_TOK':>8}")
+        print(f"  {'─'*22} {'─'*5} {'─'*6} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+        for node, t in sorted(node_totals.items()):
+            print(f"  {node:<22} {t['calls']:>5} {t['errors']:>6} {t['duration']:>7.1f}s"
+                  f"  {t['input_tokens']:>8}  {t['output_tokens']:>8}  {t['total_tokens']:>8}")
+
+    # Docker phase summary.
+    docker_total = 0.0
+    docker_count = 0
+    for r in results:
+        for run in r.get("docker_runs", []):
+            for key in ("install_duration_seconds", "test_duration_seconds"):
+                val = run.get(key)
+                if isinstance(val, (int, float)):
+                    docker_total += val
+                    docker_count += 1
+    if docker_count:
+        print(f"\n  Docker runs: {docker_count}   total sandbox time: {docker_total:.1f}s   avg: {docker_total/docker_count:.1f}s")
+
+    # Classifier routing summary.
+    fault_counts: dict[str, int] = {}
+    for r in results:
+        for ch in r.get("classifier_history", []):
+            fault = ch.get("fault") or "unknown"
+            fault_counts[fault] = fault_counts.get(fault, 0) + 1
+    if fault_counts:
+        print(f"\n  Classifier routes: {', '.join(f'{k}: {v}' for k, v in sorted(fault_counts.items()))}")
+
+    print(f"{'#' * 70}\n")
 
 
 def print_historical_summary():
@@ -226,6 +354,8 @@ def main():
     parser.add_argument("--label", default="",
                         help="Short tag stored on every result row (e.g. the code state / "
                              "fixes active) so runs are comparable later")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Print token/time diagnostic summary after the run")
     args = parser.parse_args()
 
     if args.url:
@@ -258,6 +388,8 @@ def main():
         results.append(r)
 
     print_summary(results)
+    if args.diagnostics:
+        print_diagnostics(results)
 
 
 if __name__ == "__main__":
