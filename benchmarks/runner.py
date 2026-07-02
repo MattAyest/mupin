@@ -27,6 +27,7 @@ METRICS_FILE = Path(__file__).parent / "metrics.jsonl"
 
 POLL_INTERVAL = 5   # seconds between status polls
 TIMEOUT = 1200      # seconds before we give up on a single task (20 min)
+                    # Expert/hard questions may override this via questions.json
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,9 @@ def run_question(question: dict, run_id: str) -> dict:
     print(f"  task_id={task_id}")
     last_node = None
     last_data = {}
-    deadline = start_time + TIMEOUT
+    # Allow per-question timeout overrides, falling back to the global default.
+    per_q_timeout = question.get("timeout_seconds", TIMEOUT)
+    deadline = start_time + per_q_timeout
 
     while time.time() < deadline:
         try:
@@ -215,7 +218,7 @@ def run_question(question: dict, run_id: str) -> dict:
         "end_time": end_iso,
         "elapsed_seconds": elapsed,
         "status": "timeout",
-        "error": f"Timed out after {TIMEOUT}s",
+        "error": f"Timed out after {per_q_timeout}s",
         "sandbox_loop_count": last_data.get("sandbox_loop_count", 0),
         "compliance_loop_count": last_data.get("compliance_loop_count", 0),
         "files_generated": len(last_data.get("result") or {}),
@@ -225,7 +228,8 @@ def run_question(question: dict, run_id: str) -> dict:
     }
     append_metrics(_metrics_rows(result, diagnostics))
     print(f"\n  TIMEOUT after {elapsed}s — cancelled "
-          f"(last node={last_data.get('current_node')} "
+          f"(per-question limit={per_q_timeout}s, "
+          f"last node={last_data.get('current_node')} "
           f"sandbox_loops={last_data.get('sandbox_loop_count', 0)})")
     return result
 
@@ -280,6 +284,25 @@ def print_diagnostics(results: list[dict]):
     print(f"\n{'#' * 70}")
     print(f"  DIAGNOSTIC SUMMARY  ({results[0]['run_id']})")
     print(f"{'#' * 70}")
+
+    failure_modes: dict[str, int] = {}
+    for r in results:
+        status = r.get("status")
+        if status == "infra_exhausted":
+            failure_modes["infra_exhausted"] = failure_modes.get("infra_exhausted", 0) + 1
+        elif status != "completed":
+            err = r.get("error") or "unknown"
+            if "timed out" in err.lower() or "deadline" in err.lower():
+                key = "timeout"
+            elif "LLM for node" in err:
+                key = f"llm_fault:{err.split('node')[1].split()[0] if 'node' in err else 'unknown'}"
+            else:
+                key = err[:60]
+            failure_modes[key] = failure_modes.get(key, 0) + 1
+    if failure_modes:
+        print("\n  Failure mode counts:")
+        for k, v in sorted(failure_modes.items(), key=lambda x: -x[1]):
+            print(f"    {k}: {v}")
 
     node_totals: dict[str, dict] = {}
     for r in results:

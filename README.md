@@ -7,7 +7,7 @@ A self-healing Python code-generation microservice. Submit a natural-language pr
 3. Runs ruff, mypy, and pytest inside a hardened Docker sandbox.
 4. Checks that the implementation actually satisfies the original prompt.
 
-If a step fails, the agent routes back to the node that can fix it and tries again.
+If a step fails, the agent routes back to the node that can fix it and tries again. Nodes can also retry themselves when a transient LLM infrastructure fault occurs (timeout, 5xx/524, connection drop), up to the configured `infra_max_retries_per_node`.
 
 > This is **v0.2**. The older eight-node pipeline is preserved only in git history.
 
@@ -16,12 +16,15 @@ If a step fails, the agent routes back to the node that can fix it and tries aga
 ## Architecture
 
 ```
-test_architect
-      │
-      ▼
-coder
-      │
-      ▼
+         ┌─────────────────────────────┐
+         │  (up to infra_max_retries)  │
+         ▼                             │
+test_architect ───────────────────────┤
+      │                               │
+      ▼                               │
+coder ────────────────────────────────┤
+      │                               │
+      ▼                               │
 sandbox_arbiter ───────┐  (up to 5 loops)
       │                │
       ▼                │
@@ -35,10 +38,10 @@ FINISH ◄───────────────┘
 
 | Node | Responsibility | Routes on failure |
 |---|---|---|
-| `test_architect` | Writes `tests/test_main.py`, `src/main.py` skeleton, and init files from the prompt. | `FINISH` if it cannot emit the required files. |
-| `coder` | Replaces skeleton bodies with real logic; preserves tests. | `FINISH` if no `src/main.py` is produced. |
+| `test_architect` | Writes `tests/test_main.py`, `src/main.py` skeleton, and init files from the prompt. | `coder` on success; `test_architect` on transient LLM fault; `FINISH` if it cannot emit the required files or after exhausting infra retries. |
+| `coder` | Replaces skeleton bodies with real logic; preserves tests. | `sandbox_arbiter` on success; `coder` on transient LLM fault; `FINISH` if no `src/main.py` is produced. |
 | `sandbox_arbiter` | Installs deps, formats/lints code, runs `mypy` on `src/main.py`, runs pytest. | `coder` for implementation/test/runtime faults; `test_architect` for test-side faults; `FINISH` for infrastructure faults. |
-| `prompt_compliance_checker` | Reads the passing implementation and tests and judges whether every functional requirement in the prompt is covered. | `test_architect` with a critique, up to 2 times; then `FINISH`. |
+| `prompt_compliance_checker` | Reads the passing implementation and tests and judges whether every functional requirement in the prompt is covered. | `test_architect` with a critique, up to 2 times; `prompt_compliance_checker` on transient LLM fault; then `FINISH`. |
 
 ### Per-node LLM routing
 
@@ -87,7 +90,8 @@ Swap models without rebuilding — `llm_config.yaml` is mounted read-only at run
 - `completed` — sandbox passed and prompt compliance checker returned `PASS`.
 - `exhausted` — loop/replan ceiling, server deadline, or an infrastructure fault.
 - `cancelled` — cancelled via `POST /task/<task_id>/cancel`.
-- `failed` — unhandled exception, including `LLMUnavailableError` after retries.
+- `infra_exhausted` — transient LLM infrastructure faults (timeouts, 5xx/524, connection drops) exhausted the per-node retry budget.
+- `failed` — unhandled exception, including permanent `LLMUnavailableError` after retries.
 
 ### Cancel a task
 
@@ -104,6 +108,7 @@ curl -X POST http://localhost:8000/task/<task_id>/cancel
 - `task_id`, `status`, `current_node`
 - `sandbox_loop_count`, `compliance_loop_count`
 - `compliance_status` (`PASS`, `FAIL`, or empty)
+- `llm_infra_exhausted` — `true` if the retry budget for transient LLM faults was exhausted
 - `error` — last `sandbox_errors` value or terminal reason
 - `thoughts` — one-liner per node
 - `node_history` — wall-clock timings
@@ -152,6 +157,10 @@ docker:
 
 server:
     task_deadline_seconds: 3600
+
+resilience:
+    infra_max_retries_per_node: 5
+    infra_retry_backoff_seconds: [10, 30, 60, 120, 120]
 ```
 
 Supported providers: `ollama-cloud`, `ollama` (local), `openai`, `anthropic`, `google-genai`, `openai-compatible`.
@@ -200,5 +209,12 @@ The verifier still spawns sibling test containers against the host Docker socket
 
 ## Version history
 
-- **v0.2** (current) — simplified four-node pipeline: `test_architect`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`.
+- **v0.2** (current) — simplified four-node pipeline: `test_architect`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`. Added per-node transient LLM fault retry and self-loop conditional edges.
 - **v0.1** — eight-node pipeline with separate architect, test writer, contract verifier, code writer, static analyzer, deterministic verifier, error distiller, and archivist. Recoverable from git history if needed.
+
+### Latest benchmark snapshot
+
+Run `run_20260701_215012` (12 questions, direct Ollama Cloud routing): **9/12 passed**.
+
+- Passed: `fibonacci`, `stack`, `word_frequency`, `csv_parse`, `graph`, `token_bucket`, `min_heap`, `bounded_queue`, `rle`.
+- Failed: `merge_sorted` (Hypothesis API hallucination: `st.lists(..., sorted=True)`), `calculator` (runner timeout), `evaluator` (runner timeout).

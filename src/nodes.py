@@ -25,9 +25,9 @@ from .state import AgenticState
 class LLMUnavailableError(Exception):
     """Raised when an LLM call is retried up to the configured cap and still fails.
 
-    This is an infrastructure fault, not a code/test/spec fault. It is surfaced
-    as a terminal failure so the run is not silently scored as a code-quality
-    issue and the operator sees a clear message.
+    This is normally an infrastructure fault (timeout, 5xx, connection drop),
+    not a code/test/spec fault. Transient faults are now retried at the node
+    level so they do not become terminal "failed" statuses.
     """
 
     def __init__(
@@ -36,11 +36,15 @@ class LLMUnavailableError(Exception):
         attempts: int,
         cause: Exception,
         usage_entries: list[dict] | None = None,
+        is_transient: bool | None = None,
     ):
         self.node_name = node_name
         self.attempts = attempts
         self.cause = cause
         self.usage_entries = usage_entries or []
+        self.is_transient = (
+            is_transient if is_transient is not None else _is_transient_llm_error(cause)
+        )
         super().__init__(
             f"LLM for node '{node_name}' failed after {attempts} attempt(s): {cause}"
         )
@@ -54,7 +58,35 @@ with open(CONFIG_PATH, "r") as f:
     CONFIG = yaml.safe_load(f)
 
 OLLAMA_CLOUD_HOST = "https://ollama.com"
+# Per-call timeout for Ollama providers.  This is intentionally generous
+# because Ollama Cloud often cold-starts models; the per-node timeout in
+# llm_config.yaml provides the hard budget at the retry-wrapper level.
 OLLAMA_TIMEOUT = httpx.Timeout(connect=15, read=180, write=15, pool=15)
+
+# Resilience configuration loaded from llm_config.yaml.
+RESILIENCE = CONFIG.get("resilience", {})
+INFRA_MAX_RETRIES = int(RESILIENCE.get("infra_max_retries_per_node", 5))
+INFRA_BACKOFFS = [
+    float(x) for x in RESILIENCE.get("infra_retry_backoff_seconds", [10, 30, 60, 120, 120])
+]
+
+# HTTP status codes and error names that we treat as transient provider faults.
+TRANSIENT_HTTP_STATUSES = {502, 503, 504, 524}
+TRANSIENT_ERROR_NAMES = {
+    "ReadTimeout",
+    "ConnectTimeout",
+    "ConnectionError",
+    "ConnectionResetError",
+    "TimeoutError",
+    "FutureTimeoutError",
+    "SSLError",
+    "SSLZeroReturnError",
+    "SSLEOFError",
+    "IncompleteReadError",
+    "ChunkedEncodingError",
+    "RemoteDisconnected",
+    "ProtocolError",
+}
 
 SUPPORTED_PROVIDERS = (
     "google-genai",
@@ -224,6 +256,33 @@ def validate_config():
 # =============================================================================
 # Token estimation
 # =============================================================================
+def _is_transient_llm_error(e: Exception) -> bool:
+    """Return True if an exception looks like a transient provider fault."""
+    if isinstance(e, FutureTimeoutError):
+        return True
+    # Unwrap langchain / httpx / requests wrapper exceptions.
+    inner = getattr(e, "__cause__", None) or e
+    err_name = type(inner).__name__
+    err_text = f"{err_name}: {inner}"
+    if err_name in TRANSIENT_ERROR_NAMES:
+        return True
+    # Common substring indicators (English + some provider-specific text).
+    lowered = err_text.lower()
+    if any(tok in lowered for tok in (
+        "timeout", "timed out", "temporarily unavailable", "rate limit",
+        "try again", "server error", "bad gateway", "gateway timeout",
+        "origin_response_timeout",
+    )):
+        return True
+    # Extract HTTP status code from the text if present.
+    import re as _re
+    for m in _re.finditer(r"\b(\d{3})\b", err_text):
+        status = int(m.group(1))
+        if status in TRANSIENT_HTTP_STATUSES or (500 <= status < 600):
+            return True
+    return False
+
+
 def _estimate_tokens(text: str) -> int:
     """Rough, fast token estimate for diagnostics only."""
     if not text:
@@ -253,8 +312,8 @@ def _invoke_with_retry(
     node_name: str,
     messages,
     workspace: str = "",
-    max_attempts: int = 3,
-    timeout_seconds: float = 900.0,
+    max_attempts: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[str, list[dict]]:
     """Call a node's LLM with a hard per-attempt timeout, retrying on transient
     errors (network drops, SSL EOF, incomplete reads, provider 5xx, slow streams).
@@ -263,6 +322,8 @@ def _invoke_with_retry(
     LLMUnavailableError so the task fails fast with a clear message.
     """
     node_config = CONFIG.get("nodes", {}).get(node_name, {})
+    max_attempts = max_attempts if max_attempts is not None else node_config.get("max_attempts", 3)
+    timeout_seconds = timeout_seconds if timeout_seconds is not None else node_config.get("timeout_seconds", 600.0)
     provider = node_config.get("provider")
     model = node_config.get("model", "unknown")
     ollama_providers = ("ollama-cloud", "ollama")
@@ -371,10 +432,13 @@ def _invoke_with_retry(
                     f"LLM attempt {attempt}/{max_attempts} failed: {type(e).__name__}: {e}",
                 )
         if attempt < max_attempts:
-            backoff = (2.0, 5.0, 15.0)[attempt - 1]
+            # Quicker backoff: the provider is often slow, not unavailable.
+            backoff = (2.0, 5.0, 10.0)[min(attempt - 1, 2)]
             time.sleep(backoff)
 
-    raise LLMUnavailableError(node_name, max_attempts, last_error, usage_entries) from last_error
+    # Classify the final failure once instead of re-evaluating in callers.
+    transient = _is_transient_llm_error(last_error) if last_error else False
+    raise LLMUnavailableError(node_name, max_attempts, last_error, usage_entries, is_transient=transient) from last_error
 
 
 # =============================================================================
@@ -442,6 +506,57 @@ def node_with_history(func):
         return result
 
     return wrapper
+
+
+def _handle_llm_unavailable(
+    node_name: str,
+    state: AgenticState,
+    exc: LLMUnavailableError,
+    workspace: str,
+):
+    """Decide whether to retry the same node or mark the task infra-exhausted.
+
+    Returns a dict update for the LangGraph state. When transient retries
+    remain, the update sets next_node back to the same node and sleeps the
+    configured backoff. When exhausted, it sets llm_infra_exhausted so the
+    API layer can report status=infra_exhausted instead of failed.
+    """
+    retries = state.get("llm_infra_retries", {})
+    count = retries.get(node_name, 0)
+    usage_entries = list(getattr(exc, "usage_entries", []))
+
+    if exc.is_transient and count < INFRA_MAX_RETRIES:
+        new_count = count + 1
+        backoff = INFRA_BACKOFFS[min(count, len(INFRA_BACKOFFS) - 1)]
+        diag = (
+            f"Transient LLM fault for {node_name} (attempt {new_count}/{INFRA_MAX_RETRIES}); "
+            f"retrying after {backoff}s backoff"
+        )
+        _diag(workspace, node_name, diag)
+        time.sleep(backoff)
+        return {
+            "llm_infra_retries": {**retries, node_name: new_count},
+            "llm_usage": usage_entries,
+            "sandbox_errors": "",
+            "next_node": node_name,
+            "thoughts": _think(workspace, node_name, diag),
+        }
+
+    # Exhausted or permanent error.
+    kind = "transient" if exc.is_transient else "permanent"
+    diag = (
+        f"LLM infrastructure {kind} fault for {node_name} exhausted "
+        f"({count} infra retries used): {exc.cause}"
+    )
+    _diag(workspace, node_name, diag)
+    return {
+        "llm_infra_retries": {**retries, node_name: count},
+        "llm_infra_exhausted": True,
+        "llm_usage": usage_entries,
+        "sandbox_errors": diag,
+        "next_node": "FINISH",
+        "thoughts": _think(workspace, node_name, diag),
+    }
 
 
 # =============================================================================
@@ -624,8 +739,11 @@ def test_architect(state: AgenticState):
           - Add one explicit @given for every rule/guarantee in the prompt.
           - Constrain strategies at the source; never use assume().
           - Use pytest.raises for raise-rule cases.
-          - Use concrete boundary tests (empty, zero, single, max) only when the prompt
-            explicitly mentions a boundary.
+          - Write property tests that would reject a lazy, literal, or loophole-seeking
+            implementation. Assume the coder will try to pass with the smallest possible
+            code; close those loopholes by testing implied invariants, adversarial shapes,
+            and edge cases that a robust solution must handle even if the prompt does not
+            list them explicitly.
           - Free-form, tautological, or vacuous assertions are prohibited.
           - Import the implementation from src.main.
           - Every @given test must have @settings(max_examples=50).
@@ -669,11 +787,14 @@ def test_architect(state: AgenticState):
             f"revise the tests and the matching skeleton:\n{sandbox_errors[:4000]}"
         )
 
-    content, llm_usage = _invoke_with_retry(
-        "test_architect",
-        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-        workspace,
-    )
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "test_architect",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("test_architect", state, e, workspace)
 
     files = _parse_file_tags(content)
 
@@ -778,11 +899,14 @@ def coder(state: AgenticState):
             f"not the tests:\n{sandbox_errors[:4000]}"
         )
 
-    content, llm_usage = _invoke_with_retry(
-        "coder",
-        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-        workspace,
-    )
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "coder",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("coder", state, e, workspace)
 
     new_files = _parse_file_tags(content)
 
@@ -1283,7 +1407,12 @@ def prompt_compliance_checker(state: AgenticState):
 
         Evaluate whether src/main.py structurally satisfies the user prompt.
         Only judge completeness against the prompt's explicit functional requirements.
-        Do NOT critique style, naming conventions, performance optimization, or code elegance.
+        Style, naming conventions, and performance optimization are explicitly out of scope.
+        However, if the prompt names a standard algorithmic construct (e.g., "graph",
+        "parser", "heap", "queue", "evaluator"), the implementation must be structurally
+        sound for that construct: correct semantics, idiomatic data structures, and no
+        obvious anti-patterns that would make it fail under normal adversarial use. Reject
+        only clear functional or structural defects, not cosmetic preferences.
         Do NOT require features the prompt does not mention.
 
         Output exactly a JSON object and nothing else:
@@ -1302,11 +1431,14 @@ def prompt_compliance_checker(state: AgenticState):
             + "\n".join(f"- {c}" for c in prior_critique)
         )
 
-    content, llm_usage = _invoke_with_retry(
-        "prompt_compliance_checker",
-        [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-        workspace,
-    )
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "prompt_compliance_checker",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("prompt_compliance_checker", state, e, workspace)
 
     # Extract JSON from the response (allow surrounding markdown fences).
     json_match = re.search(

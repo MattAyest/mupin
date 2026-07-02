@@ -46,6 +46,15 @@ class AgenticState(TypedDict):
     next_node: str
 
     # ------------------------------------------------------------------
+    # Transient LLM infrastructure fault tracking
+    # ------------------------------------------------------------------
+    # Per-node count of retries due to provider timeouts/5xx/etc. When a node
+    # exhausts its budget, llm_infra_exhausted becomes True so the API can
+    # report a non-code terminal status instead of "failed".
+    llm_infra_retries: Dict[str, int]
+    llm_infra_exhausted: bool
+
+    # ------------------------------------------------------------------
     # Diagnostics: per-node timing, LLM usage, sandbox runs, and routing
     # decisions. Optional so old state serializes.
     # ------------------------------------------------------------------

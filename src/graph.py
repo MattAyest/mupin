@@ -28,13 +28,13 @@ workflow.set_entry_point("test_architect")
 workflow.add_conditional_edges(
     "test_architect",
     lambda state: state["next_node"],
-    {"coder": "coder", "FINISH": END},
+    {"coder": "coder", "test_architect": "test_architect", "FINISH": END},
 )
 
 workflow.add_conditional_edges(
     "coder",
     lambda state: state["next_node"],
-    {"sandbox_arbiter": "sandbox_arbiter", "FINISH": END},
+    {"sandbox_arbiter": "sandbox_arbiter", "coder": "coder", "FINISH": END},
 )
 
 workflow.add_conditional_edges(
@@ -51,7 +51,7 @@ workflow.add_conditional_edges(
 workflow.add_conditional_edges(
     "prompt_compliance_checker",
     route_from_compliance,
-    {"test_architect": "test_architect", "FINISH": END},
+    {"test_architect": "test_architect", "prompt_compliance_checker": "prompt_compliance_checker", "FINISH": END},
 )
 
 app = workflow.compile()

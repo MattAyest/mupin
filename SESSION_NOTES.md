@@ -280,6 +280,30 @@ python benchmarks/runner.py --summary
 
 ## 10. Prompt Change Log
 
+### 2026-07-01 — anti-lazy test contract + resilience tuning
+
+- Updated `test_architect` system prompt in `src/nodes.py`:
+  replaced the restrictive "concrete boundary tests only when explicitly mentioned" rule with
+  a general adversarial principle: tests must reject lazy, literal, or loophole-seeking
+  implementations by covering implied invariants and edge cases the prompt does not enumerate.
+  This closes the root cause behind shallow `csv_parse`/`graph`/`evaluator` implementations.
+- Updated `prompt_compliance_checker` system prompt: style/performance remain out of scope, but
+  standard named constructs (graph, parser, heap, queue, evaluator) must be structurally sound
+  and free of obvious anti-patterns that would fail under normal adversarial use.
+- Added per-node `timeout_seconds` and `max_attempts` to `llm_config.yaml` (defaults picked up
+  by `_invoke_with_retry`). Reduced default per-attempt timeout from 900s to 600s and tightened
+  the third retry backoff to 10s.
+- Added `deadline_seconds` plumbing in `src/api.py` so the server task deadline propagates
+  to `asyncio.wait_for` and is reported correctly on timeout.
+- Added per-question `timeout_seconds` support to `benchmarks/runner.py` and `questions.json`,
+  giving `csv_parse`, `graph`, and `evaluator` 30-40 min budgets while keeping the default
+  runner timeout at 20 min. Added failure-mode bucketing to diagnostic summary.
+- Considered (and reverted) a `test_architect` prompt edit that would have required tests to
+  use only `st.composite` from `hypothesis.strategies` and prohibited importing the top-level
+  `composite` decorator from `hypothesis`. The goal was to prevent `ImportError: cannot import name 'composite'`
+  failures seen on strategy-heavy questions like `csv_parse`. Reverted because it is a prompt change
+  the user did not request; kept as a note in case future runs continue to show this failure mode.
+
 ### 2026-06-30 — calculator expression-generation guidance
 
 - Updated `test_architect` user prompt in `src/nodes.py` with language-specific guidance:
@@ -297,6 +321,88 @@ python benchmarks/runner.py --summary
   This prevents generated Hypothesis strategies from accidentally changing the intended
   value when composing recursive expressions (e.g., division-by-zero denominators that
   evaluated to non-zero due to missing parentheses).
+
+### 2026-07-01 — Ollama Cloud host fix
+
+- Changed `OLLAMA_CLOUD_HOST` in `src/nodes.py` from `https://ollama.com` to
+  `https://api.ollama.com` because `api.ollama.cloud`/`ollama.com` were not resolving on
+  the local network and causing `ReadTimeout` failures for `test_architect`.
+- **Note:** a later LiteLLM proxy integration was built and then reverted; the orchestrator
+  currently calls Ollama Cloud directly again.
+
+### 2026-07-01 — LiteLLM Ollama Cloud proxy integration (reverted)
+
+> **Status:** This integration was built and verified, but the user later removed it and
+> returned to direct Ollama Cloud routing. The proxy directory may still exist at
+> `~/DockerContainers/litellm-ollama-proxy`, but it is not part of the active architecture.
+
+- Added a local LiteLLM proxy in `~/DockerContainers/litellm-ollama-proxy` that fronts two
+  Ollama Cloud accounts, round-robins requests, and retries/cooldowns failing backends.
+  - Fixed `config.yaml` to use the `ollama_chat/*` provider with `api_base: https://ollama.com`,
+    which is the correct LiteLLM mapping for Ollama Cloud's native `/api/chat` endpoint.
+    The previous `openai/*` + `https://api.ollama.com/v1` configuration caused 405 errors
+    because Ollama Cloud's `/v1` OpenAI-compatible passthrough does not accept those model names.
+  - Fixed `LITELLM_MASTER_KEY` to start with `sk-` as required by LiteLLM.
+  - Put the proxy and the Coding Module on a shared external Docker network `llm-proxy` so
+    the orchestrator could reach the proxy by container name.
+- Updated `llm_config.yaml` to route all nodes through the proxy:
+  - provider: `openai-compatible`
+  - base_url: `http://litellm-ollama-proxy:4000/v1`
+  - api_key_env_var: `LITELLM_MASTER_KEY`
+  - model names: `kimi-k2.7-code:cloud` for `test_architect`/`coder`, and
+    `nemotron-3-nano:30b:cloud` (correct Ollama Cloud name) for `prompt_compliance_checker`.
+- Updated `.env` and `.env.example` to expose `LITELLM_MASTER_KEY` and retired the direct
+  `OLLAMA_API_KEY` from active use.
+- Updated `docker-compose.yml` to attach the Coding Module API to the `llm-proxy` network.
+- Verified end-to-end with a `fibonacci` benchmark run that passed in ~55s.
+
+### 2026-07-01 — LiteLLM proxy: expose all Ollama Cloud models (reverted)
+
+> **Status:** This proxy work was reverted with the rest of the LiteLLM integration.
+
+- Replaced the explicit 4-model proxy config with the full Ollama Cloud catalog.
+  The proxy queried `https://api.ollama.com/v1/models` and registered every model
+  (35 base + `:cloud` variants) across both backends, for a total of 70 model names
+  and 140 endpoints.
+- Fixed the Coding Module `prompt_compliance_checker` model from the incorrect
+  `nemotron-3-nano:30b-cloud` to the actual Ollama Cloud name `nemotron-3-nano:30b:cloud`.
+- Re-tested the Coding Module with a `fibonacci` run; it passed end-to-end.
+
+### 2026-07-01 — transient LLM infrastructure fault retry
+
+- Added per-node transient LLM fault retry logic in `src/nodes.py`.
+  `_invoke_with_retry` now tags the final `LLMUnavailableError` as transient or permanent
+  based on error type/status codes (timeouts, 5xx/524, connection errors are transient;
+  4xx/auth/config errors are permanent). Nodes catch `LLMUnavailableError` and, for
+  transient faults, return `next_node: <self>` up to `infra_max_retries_per_node` times
+  with configurable backoff. When exhausted, they set `llm_infra_exhausted=True` and route
+  to `FINISH`.
+- Added `llm_infra_retries` and `llm_infra_exhausted` to `AgenticState` in `src/state.py`.
+- Added `resilience` block to `llm_config.yaml` with `infra_max_retries_per_node: 5` and
+  backoff `[10, 30, 60, 120, 120]`.
+- Updated `src/api.py` to emit `status="infra_exhausted"` when `llm_infra_exhausted` is set,
+  so Ollama-induced failures are not scored as code failures.
+- Updated `benchmarks/runner.py` diagnostics to bucket `infra_exhausted` separately.
+- Permanent LLM/config errors still surface as `status="failed"`.
+
+### 2026-07-01 — self-loop conditional edge fix
+
+- Fixed `KeyError('test_architect')` crash that killed tasks during infra retry.
+  The nodes return `next_node: <self>` on transient LLM faults, but the conditional edge
+  mappings in `src/graph.py` did not include those self-loop targets, so LangGraph raised
+  `KeyError` and the runner recorded `status="failed" error='test_architect'`.
+- Updated `src/graph.py` to add `test_architect`, `coder`, and `prompt_compliance_checker`
+  as valid self-loop targets in their respective conditional edge mappings.
+- Updated `src/api.py` to propagate `llm_infra_exhausted` and `llm_infra_retries` from the
+  graph stream into `tasks_db` / `TaskStatusResponse`, so the API correctly reports
+  `infra_exhausted` instead of `failed`.
+- Verified the fix by re-running the 12-question benchmark (`run_20260701_215012` / label
+  `run_12_002`): the crash disappeared and the run completed all 12 questions.
+  Result: **9/12 passed**. Remaining failures:
+  - `merge_sorted`: `test_architect` hallucinated Hypothesis API `st.lists(..., sorted=True)`;
+    the generated tests fail collection and the sandbox routes to `coder` as a code fault.
+  - `calculator`: runner per-question timeout (20 min) exceeded.
+  - `evaluator`: runner per-question timeout (40 min) exceeded.
 
 ### v0.2 refactor
 

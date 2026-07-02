@@ -27,16 +27,19 @@
   {
     "id": "csv_parse",
     "difficulty": "hard",
+    "timeout_seconds": 1800,
     "prompt": "Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string into a list of dicts, one per data row. The first non-empty line is the header row supplying the keys. Each cell value is type-inferred: an int if it matches an integer pattern, a float if it matches a decimal pattern, otherwise the original string. Input with no data rows returns []. Raise ValueError if any data row has a different number of fields than the header."
   },
   {
     "id": "graph",
     "difficulty": "hard",
+    "timeout_seconds": 1800,
     "prompt": "Write a Python module implementing a directed Graph class with methods: add_edge(u, v), dfs(start) -> list, bfs(start) -> list, has_cycle() -> bool, and shortest_path(start, end) -> list. dfs and bfs return nodes in visitation order, visiting neighbors in the order their edges were added. shortest_path returns the node sequence of a path with the fewest edges, or [] if no path exists. Calling dfs, bfs, or shortest_path with a node that was never added raises KeyError."
   },
   {
     "id": "evaluator",
     "difficulty": "hard",
+    "timeout_seconds": 2400,
     "prompt": "Write a Python module with a function `evaluate(expression: str) -> float` that evaluates an arithmetic expression supporting +, -, *, /, ** (exponentiation, right-associative), unary minus, and parentheses, all with correct operator precedence. Integer and decimal literals are allowed and whitespace is insignificant. Raise ValueError on malformed input and ZeroDivisionError on division by zero."
   },
   {

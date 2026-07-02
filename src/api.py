@@ -18,7 +18,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from .graph import app as swarm_graph
-from .nodes import SERVER_TASK_DEADLINE, validate_config
+from .nodes import LLMUnavailableError, SERVER_TASK_DEADLINE, validate_config
 
 app = FastAPI(title="Coding Module Microservice — v0.2")
 
@@ -48,6 +48,7 @@ class TaskStatusResponse(BaseModel):
     result: Dict[str, Any] | None = None
     error: str | None = None
     compliance_status: str | None = None
+    llm_infra_exhausted: bool = False
     thoughts: List[str] = []
     node_history: List[Dict[str, Any]] = []
     llm_usage: List[Dict[str, Any]] = []
@@ -84,12 +85,16 @@ async def _drive_graph(task_id: str, initial_state: Dict[str, Any]) -> Dict[str,
                     tasks_db[task_id]["docker_runs"].extend(state_update["docker_runs"])
                 if "classifier_history" in state_update:
                     tasks_db[task_id]["classifier_history"].extend(state_update["classifier_history"])
+                if "llm_infra_exhausted" in state_update:
+                    tasks_db[task_id]["llm_infra_exhausted"] = state_update["llm_infra_exhausted"]
+                if "llm_infra_retries" in state_update:
+                    tasks_db[task_id]["llm_infra_retries"] = state_update["llm_infra_retries"]
     finally:
         await stream.aclose()
     return final_manifest
 
 
-async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
+async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str, deadline: float | None = None):
     initial_state = {
         "user_prompt": prompt,
         "workspace_dir": workspace_dir,
@@ -101,7 +106,10 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
         "compliance_critique": [],
         "sandbox_loop_count": 0,
         "compliance_loop_count": 0,
+        "deadline_seconds": deadline,
         "next_node": "test_architect",
+        "llm_infra_exhausted": False,
+        "llm_infra_retries": {},
         "thoughts": [],
         "node_history": [],
         "llm_usage": [],
@@ -111,7 +119,7 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
 
     try:
         final_manifest = await asyncio.wait_for(
-            _drive_graph(task_id, initial_state), timeout=SERVER_TASK_DEADLINE
+            _drive_graph(task_id, initial_state), timeout=deadline or SERVER_TASK_DEADLINE
         )
 
         tasks_db[task_id]["result"] = final_manifest
@@ -119,6 +127,12 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
 
         if final_node == "prompt_compliance_checker" and tasks_db[task_id].get("compliance_status") == "PASS":
             tasks_db[task_id]["status"] = "completed"
+        elif tasks_db[task_id].get("llm_infra_exhausted"):
+            tasks_db[task_id]["status"] = "infra_exhausted"
+            tasks_db[task_id]["error"] = (
+                tasks_db[task_id].get("error")
+                or "LLM infrastructure retries exhausted"
+            )
         elif tasks_db[task_id].get("compliance_status") == "FAIL":
             tasks_db[task_id]["status"] = "exhausted"
             tasks_db[task_id]["error"] = (
@@ -134,13 +148,19 @@ async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str):
 
     except asyncio.TimeoutError:
         tasks_db[task_id]["status"] = "exhausted"
-        tasks_db[task_id]["error"] = f"Server task deadline ({SERVER_TASK_DEADLINE}s) exceeded"
+        actual_deadline = deadline or SERVER_TASK_DEADLINE
+        tasks_db[task_id]["error"] = f"Server task deadline ({actual_deadline}s) exceeded"
         tasks_db[task_id]["result"] = None
     except asyncio.CancelledError:
         tasks_db[task_id]["status"] = "cancelled"
         tasks_db[task_id]["error"] = "Task cancelled"
         tasks_db[task_id]["result"] = None
         raise
+    except LLMUnavailableError as e:
+        tasks_db[task_id]["status"] = "failed"
+        tasks_db[task_id]["error"] = str(e)
+        tasks_db[task_id]["result"] = None
+        tasks_db[task_id]["llm_usage"].extend(getattr(e, "usage_entries", []))
     except Exception as e:
         tasks_db[task_id]["status"] = "failed"
         tasks_db[task_id]["error"] = str(e)
@@ -168,6 +188,8 @@ async def generate_code(request: TaskRequest):
         "result": None,
         "error": None,
         "compliance_status": None,
+        "llm_infra_exhausted": False,
+        "llm_infra_retries": {},
         "thoughts": [],
         "node_history": [],
         "llm_usage": [],
@@ -176,7 +198,7 @@ async def generate_code(request: TaskRequest):
     }
 
     running_tasks[task_id] = asyncio.create_task(
-        run_swarm_task(task_id, request.prompt, workspace_dir)
+        run_swarm_task(task_id, request.prompt, workspace_dir, deadline=SERVER_TASK_DEADLINE)
     )
 
     return tasks_db[task_id]
