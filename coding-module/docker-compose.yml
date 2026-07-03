@@ -1,7 +1,6 @@
 services:
   coding-module-api:
-    build:
-      context: ./coding-module
+    build: .
     container_name: coding_module_api
     restart: always
     ports:
@@ -9,12 +8,12 @@ services:
     volumes:
       # Map docker.sock so the container can spin up sibling containers for testing
       - /var/run/docker.sock:/var/run/docker.sock
-      # Map the module workspaces directory so files are accessible on the host
-      - ./coding-module/.workspaces:/app/.workspaces
-      # Mount module config read-only so per-node model choices can change without a rebuild
-      - ./coding-module/llm_config.yaml:/app/llm_config.yaml:ro
+      # Map the workspaces directory so files are accessible on the host
+      - ./.workspaces:/app/.workspaces
+      # Mount config read-only so per-node model choices can change without a rebuild
+      - ./llm_config.yaml:/app/llm_config.yaml:ro
     env_file:
-      - ./coding-module/.env
+      - .env
     environment:
       # Pass the host user identity down so sandbox test containers can run
       # unprivileged instead of as root. Defaults to 1000:1000.
