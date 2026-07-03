@@ -41,6 +41,13 @@ class AgenticState(TypedDict):
     compliance_loop_count: int
 
     # ------------------------------------------------------------------
+    # Test/skeleton contract loop tracking
+    # ------------------------------------------------------------------
+    contract_loop_count: int
+    contract_critique: List[str]
+    contract_exhausted: bool
+
+    # ------------------------------------------------------------------
     # Routing signal
     # ------------------------------------------------------------------
     next_node: str

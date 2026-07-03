@@ -8,16 +8,17 @@
 
 A self-healing Python code-generation microservice. A user posts a natural-language prompt to a FastAPI endpoint. A LangGraph state machine then:
 
-1. `test_architect` — designs a pytest + Hypothesis test suite and a matching `src/main.py` skeleton from the prompt.
-2. `coder` — replaces the skeleton bodies with real logic so the tests pass.
-3. `sandbox_arbiter` — runs ruff, mypy, and pytest inside a hardened Docker container.
-4. `prompt_compliance_checker` — verifies the passing implementation actually covers every functional requirement in the user's prompt.
+1. `test_designer` — designs a lean pytest + Hypothesis test suite from the prompt.
+2. `skeleton_maker` — derives a matching `src/main.py` skeleton from the tests and checks prompt/test/skeleton compatibility.
+3. `coder` — replaces the skeleton bodies with real logic so the tests pass.
+4. `sandbox_arbiter` — runs ruff, mypy, and pytest inside a hardened Docker container.
+5. `prompt_compliance_checker` — verifies the passing implementation actually covers every functional requirement in the user's prompt.
 
 If a node fails, it routes back to the node that can fix it:
 
-- test-side faults → `test_architect`
+- test-side or contract faults → `test_designer`
 - implementation/runtime faults → `coder`
-- prompt-coverage gaps → `test_architect` with a critique
+- prompt-coverage gaps → `test_designer` with a critique
 - infrastructure faults → `FINISH`
 
 The service runs **inside Docker** (Docker-in-Docker) so the arbiter can spawn sibling `python:3.11-slim` containers via the host Docker socket.
@@ -45,7 +46,7 @@ Coding-Module/
     ├── __init__.py
     ├── main.py             # Local-dev re-export of the graph app
     ├── api.py              # FastAPI endpoints: POST /task, GET /task/{id}, GET /task/{id}/log
-    ├── graph.py            # LangGraph StateGraph wiring (4 nodes)
+    ├── graph.py            # LangGraph StateGraph wiring (5 nodes)
     ├── state.py            # AgenticState TypedDict
     └── nodes.py            # All node implementations + LLM factory + helpers
 ```
@@ -57,7 +58,10 @@ Coding-Module/
 ## 3. The State Graph (`src/graph.py`)
 
 ```
-test_architect
+test_designer
+      │
+      ▼
+skeleton_maker
       │
       ▼
 coder
@@ -94,6 +98,9 @@ class AgenticState(TypedDict):
 
     sandbox_loop_count: int          # incremented each arbiter run
     compliance_loop_count: int       # incremented each compliance retry
+    contract_loop_count: int         # incremented each contract retry
+    contract_critique: List[str]     # accumulated contract mismatch notes
+    contract_exhausted: bool         # True if contract loop ceiling was reached
 
     next_node: str                   # routing signal
 
@@ -137,13 +144,11 @@ Writes `conftest.py`, `pytest.ini`, and `requirements.txt` **only if they do not
 
 Base sandbox deps (`SANDBOX_DEPS`): `pytest`, `hypothesis`, `ruff`, `mypy`. No `radon` in v0.2.
 
-### `test_architect`
+### `test_designer`
 
 Outputs exactly:
 
 ```
-<file name="src/main.py">...</file>
-<file name="src/__init__.py">...</file>
 <file name="tests/test_main.py">...</file>
 <file name="tests/__init__.py">...</file>
 ```
@@ -154,9 +159,29 @@ Rules it follows:
 - Uses `pytest.raises` for raise-rule cases.
 - Imports the implementation from `src.main`.
 - Every `@given` test has `@settings(max_examples=50)`.
+- Generates only a lean baseline covering the prompt's explicit requirements.
+- Does not output `src/main.py`, `requirements.txt`, or any skeleton.
 
-On a compliance retry it receives `compliance_critique` and `sandbox_errors` and revises.
-Routes to `coder` on success, `FINISH` on error.
+On a contract or compliance retry it receives `contract_critique`, `compliance_critique`, and `sandbox_errors` and revises.
+Routes to `skeleton_maker` on success, `FINISH` on error.
+
+### `skeleton_maker`
+
+Receives the current `tests/test_main.py` and produces:
+
+```
+<file name="src/main.py">...</file>
+<file name="src/__init__.py">...</file>
+<contract_verdict>{"compatible": true|false, "critique": ["..."]}</contract_verdict>
+```
+
+Rules it follows:
+- Derives signatures and type hints directly from the tests.
+- Bodies are only `pass` or `raise NotImplementedError`.
+- Checks whether the tests are compatible with the prompt.
+- Routes to `coder` if compatible.
+- Routes back to `test_designer` with `contract_critique` if incompatible (up to `MAX_CONTRACT_LOOPS`).
+- After the contract loop ceiling it proceeds to `coder` with `contract_exhausted=True`.
 
 ### `coder`
 
@@ -182,7 +207,7 @@ Two Docker runs:
 All tools are invoked as `python -m` with `PYTHONPATH=/workspace/.deps` because `pip install --target` does not put console scripts on `PATH`.
 
 Failure classification:
-- `test_fault` (→ `test_architect`): ruff failure on tests, tautology.
+- `test_fault` (→ `test_designer`): ruff failure on tests, tautology.
 - `code_fault` (→ `coder`): ruff failure on src, mypy src failure, pytest failure.
 - `infra_fault` (→ `FINISH`): dep install failure, timeout, unexpected crash.
 
@@ -195,7 +220,7 @@ Reads `user_prompt`, `src/main.py`, and `tests/test_main.py`. Outputs JSON:
 ```
 
 - `PASS` → `FINISH`.
-- `FAIL` with loops remaining → `test_architect` with the critique appended to `compliance_critique`.
+- `FAIL` with loops remaining → `test_designer` with the critique appended to `compliance_critique`.
 - `FAIL` at ceiling → `FINISH`.
 
 ---
@@ -267,7 +292,7 @@ python benchmarks/runner.py --summary
 ## 9. Common Gotchas
 
 - **Do not invoke sandbox tools as bare commands.** Use `python -m` with `PYTHONPATH=/workspace/.deps`.
-- **Do not overwrite `requirements.txt` on every `test_architect` run.** `setup_workspace` is idempotent.
+- **Do not overwrite `requirements.txt` on every `test_designer` run.** `setup_workspace` is idempotent.
 - **Always merge base sandbox deps into any coder-provided `requirements.txt`.**
 - **Mypy is run only on `src/main.py`.** Tests are too likely to trigger stub/import noise.
 - **Radon was removed in v0.2.** It added fragility without enough value.
@@ -282,11 +307,11 @@ python benchmarks/runner.py --summary
 
 ### 2026-07-01 — anti-lazy test contract + resilience tuning
 
-- Updated `test_architect` system prompt in `src/nodes.py`:
+- Updated `test_designer` system prompt in `src/nodes.py`:
   replaced the restrictive "concrete boundary tests only when explicitly mentioned" rule with
-  a general adversarial principle: tests must reject lazy, literal, or loophole-seeking
-  implementations by covering implied invariants and edge cases the prompt does not enumerate.
-  This closes the root cause behind shallow `csv_parse`/`graph`/`evaluator` implementations.
+  a lean baseline principle: tests must cover every explicit prompt requirement but should not
+  generate adversarial or edge-case tests beyond what the prompt states.
+  This reduces first-pass generation time on hard questions.
 - Updated `prompt_compliance_checker` system prompt: style/performance remain out of scope, but
   standard named constructs (graph, parser, heap, queue, evaluator) must be structurally sound
   and free of obvious anti-patterns that would fail under normal adversarial use.
@@ -298,7 +323,7 @@ python benchmarks/runner.py --summary
 - Added per-question `timeout_seconds` support to `benchmarks/runner.py` and `questions.json`,
   giving `csv_parse`, `graph`, and `evaluator` 30-40 min budgets while keeping the default
   runner timeout at 20 min. Added failure-mode bucketing to diagnostic summary.
-- Considered (and reverted) a `test_architect` prompt edit that would have required tests to
+- Considered (and reverted) a `test_designer` prompt edit that would have required tests to
   use only `st.composite` from `hypothesis.strategies` and prohibited importing the top-level
   `composite` decorator from `hypothesis`. The goal was to prevent `ImportError: cannot import name 'composite'`
   failures seen on strategy-heavy questions like `csv_parse`. Reverted because it is a prompt change
@@ -306,33 +331,33 @@ python benchmarks/runner.py --summary
 
 
 
-### 2026-07-03 — plan to split `test_architect` into baseline + hardening phases
+### 2026-07-03 — split `test_architect` into `test_designer` + `skeleton_maker`
 
-**Problem identified:** The `test_architect` node is overloaded. Its prompt mixes two jobs:
-1. Design a lean baseline test suite that satisfies the explicit prompt.
-2. Design adversarial/edge-case tests that reject lazy or loophole-seeking implementations.
+**Problem identified:** The `test_architect` node was overloaded. Its prompt mixed test design,
+skeleton derivation, and adversarial reasoning in one LLM call. Hard questions frequently hit
+runner timeouts, and the generated tests sometimes contained internal inconsistencies (e.g.,
+`csv_parse` blank-line expectations contradicted the expected output).
 
-Because both jobs run up front for every question, generation and pytest times are inflated, and hard questions frequently hit runner timeouts. The 2026-07-01 anti-lazy prompt change traded speed for correctness coverage.
+**Change implemented:** Replaced `test_architect` with two focused nodes:
+1. `test_designer` — writes only a lean baseline `tests/test_main.py` from the prompt.
+2. `skeleton_maker` — derives the `src/main.py` skeleton from those tests and emits a
+   `<contract_verdict>` declaring whether the tests are compatible with the prompt.
 
-**Planned structural change:** Split `test_architect` into two responsibilities:
-- A fast baseline phase/node that produces only prompt-covering tests + skeleton.
-- A conditional hardening phase/node that adds adversarial tests only when a passing implementation is detected as shallow or incomplete.
+**Routing:**
+- `test_designer` → `skeleton_maker`.
+- If `skeleton_maker` reports an incompatible contract, it routes back to `test_designer` with a
+  critique (up to `MAX_CONTRACT_LOOPS = 2`). After the ceiling it proceeds to `coder` with
+  `contract_exhausted=True`.
+- Sandbox test-side faults and `prompt_compliance_checker` failures route back to `test_designer`.
 
-**Candidate designs:**
-- **Option A — two nodes:** `test_designer` (baseline) and `test_hardening` (conditional adversarial tests).
-- **Option B — single node, two-phase:** `test_architect` returns baseline first; a second pass is triggered only if needed.
-- **Option C — oracle-driven adaptive loop:** Use `prompt_compliance_checker` as the oracle to decide whether hardening is required.
+**Files changed:** `src/nodes.py`, `src/graph.py`, `src/state.py`, `llm_config.yaml`, `README.md`.
 
-**Recommended approach:** Start with **Option A** for clarity, routing through `test_hardening` only when `prompt_compliance_checker` reports missing coverage or a shallow implementation passes the baseline.
-
-**Open questions before implementation:**
-- Which model should the hardening node use? Same heavy model, or a cheaper/faster one?
-- Should hardening be triggered by explicit compliance failures, heuristics, or both?
-- How does this interact with the current `test_fault` → `test_architect` retry path?
+**No hardening loop was added.** Adversarial/edge-case test generation remains out of scope for
+now; the focus is on reducing first-pass generation time and improving test/skeleton consistency.
 
 ### 2026-06-30 — calculator expression-generation guidance
 
-- Updated `test_architect` user prompt in `src/nodes.py` with language-specific guidance:
+- Updated `test_designer` user prompt in `src/nodes.py` with language-specific guidance:
   for expression evaluators / calculators / parsers, generate raw expression strings and
   compute expected values using the target language's standard evaluator (e.g., Python's
   `eval()` with a safe scope). Avoid hand-written AST renderers or string-composition
@@ -342,7 +367,7 @@ Because both jobs run up front for every question, generation and pytest times a
 
 ### 2026-06-30 — calculator sub-expression boundary fix
 
-- Updated `test_architect` system prompt in `src/nodes.py` with the rule:
+- Updated `test_designer` system prompt in `src/nodes.py` with the rule:
   "Preserve sub-expression boundaries: parenthesize any fragment inserted into a larger expression."
   This prevents generated Hypothesis strategies from accidentally changing the intended
   value when composing recursive expressions (e.g., division-by-zero denominators that
@@ -352,47 +377,9 @@ Because both jobs run up front for every question, generation and pytest times a
 
 - Changed `OLLAMA_CLOUD_HOST` in `src/nodes.py` from `https://ollama.com` to
   `https://api.ollama.com` because `api.ollama.cloud`/`ollama.com` were not resolving on
-  the local network and causing `ReadTimeout` failures for `test_architect`.
+  the local network and causing `ReadTimeout` failures for `test_designer`.
 - **Note:** a later LiteLLM proxy integration was built and then reverted; the orchestrator
   currently calls Ollama Cloud directly again.
-
-### 2026-07-01 — LiteLLM Ollama Cloud proxy integration (reverted)
-
-> **Status:** This integration was built and verified, but the user later removed it and
-> returned to direct Ollama Cloud routing. The proxy directory may still exist at
-> `~/DockerContainers/litellm-ollama-proxy`, but it is not part of the active architecture.
-
-- Added a local LiteLLM proxy in `~/DockerContainers/litellm-ollama-proxy` that fronts two
-  Ollama Cloud accounts, round-robins requests, and retries/cooldowns failing backends.
-  - Fixed `config.yaml` to use the `ollama_chat/*` provider with `api_base: https://ollama.com`,
-    which is the correct LiteLLM mapping for Ollama Cloud's native `/api/chat` endpoint.
-    The previous `openai/*` + `https://api.ollama.com/v1` configuration caused 405 errors
-    because Ollama Cloud's `/v1` OpenAI-compatible passthrough does not accept those model names.
-  - Fixed `LITELLM_MASTER_KEY` to start with `sk-` as required by LiteLLM.
-  - Put the proxy and the Coding Module on a shared external Docker network `llm-proxy` so
-    the orchestrator could reach the proxy by container name.
-- Updated `llm_config.yaml` to route all nodes through the proxy:
-  - provider: `openai-compatible`
-  - base_url: `http://litellm-ollama-proxy:4000/v1`
-  - api_key_env_var: `LITELLM_MASTER_KEY`
-  - model names: `kimi-k2.7-code:cloud` for `test_architect`/`coder`, and
-    `nemotron-3-nano:30b:cloud` (correct Ollama Cloud name) for `prompt_compliance_checker`.
-- Updated `.env` and `.env.example` to expose `LITELLM_MASTER_KEY` and retired the direct
-  `OLLAMA_API_KEY` from active use.
-- Updated `docker-compose.yml` to attach the Coding Module API to the `llm-proxy` network.
-- Verified end-to-end with a `fibonacci` benchmark run that passed in ~55s.
-
-### 2026-07-01 — LiteLLM proxy: expose all Ollama Cloud models (reverted)
-
-> **Status:** This proxy work was reverted with the rest of the LiteLLM integration.
-
-- Replaced the explicit 4-model proxy config with the full Ollama Cloud catalog.
-  The proxy queried `https://api.ollama.com/v1/models` and registered every model
-  (35 base + `:cloud` variants) across both backends, for a total of 70 model names
-  and 140 endpoints.
-- Fixed the Coding Module `prompt_compliance_checker` model from the incorrect
-  `nemotron-3-nano:30b-cloud` to the actual Ollama Cloud name `nemotron-3-nano:30b:cloud`.
-- Re-tested the Coding Module with a `fibonacci` run; it passed end-to-end.
 
 ### 2026-07-01 — transient LLM infrastructure fault retry
 
@@ -428,6 +415,7 @@ Because both jobs run up front for every question, generation and pytest times a
   `KeyError` and the runner recorded `status="failed" error='test_architect'`.
 - Updated `src/graph.py` to add `test_architect`, `coder`, and `prompt_compliance_checker`
   as valid self-loop targets in their respective conditional edge mappings.
+  (After the 2026-07-03 split, `test_designer` and `skeleton_maker` also need self-loop targets.)
 - Updated `src/api.py` to propagate `llm_infra_exhausted` and `llm_infra_retries` from the
   graph stream into `tasks_db` / `TaskStatusResponse`, so the API correctly reports
   `infra_exhausted` instead of `failed`.
@@ -436,12 +424,22 @@ Because both jobs run up front for every question, generation and pytest times a
   Result: **9/12 passed**. Remaining failures:
   - `merge_sorted`: `test_architect` hallucinated Hypothesis API `st.lists(..., sorted=True)`;
     the generated tests fail collection and the sandbox routes to `coder` as a code fault.
+    (This failure mode now routes to `test_designer`.)
   - `calculator`: runner per-question timeout (20 min) exceeded.
   - `evaluator`: runner per-question timeout (40 min) exceeded.
 
+### 2026-07-03 — SESSION_NOTES cleanup
+
+- Updated the v0.2 architecture overview and state schema to reflect the
+  `test_designer`/`skeleton_maker` split.
+- Replaced remaining `test_architect` references in the onboarding sections
+  with `test_designer` and `skeleton_maker`.
+- Removed the detailed LiteLLM proxy subsections because that integration was
+  reverted and is no longer part of the active architecture.
+
 ### v0.2 refactor
 
-- Rewrote `test_architect`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker` system prompts.
+- Rewrote `test_designer` (formerly `test_architect`), `coder`, `sandbox_arbiter`, `prompt_compliance_checker` system prompts.
 - Dropped `contract_verifier`, `error_distiller`, `archivist_node`, `static_analyzer`, `deterministic_verifier`, `architect_node` prompts.
 - Simplified prompts to produce a single-file contract: `src/main.py` + `tests/test_main.py`.
 - Sandbox arbiter now uses `python -m ruff/mypy/pytest` instead of bare commands.

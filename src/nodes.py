@@ -112,6 +112,7 @@ SANDBOX_DEPS = [
 # Loop / ceiling constants
 MAX_SANDBOX_LOOPS = 5
 MAX_COMPLIANCE_LOOPS = 2
+MAX_CONTRACT_LOOPS = 2
 
 # Server-side hard wall-clock deadline per task. A backstop that auto-cancels a
 # task even if the client died without cancelling it.
@@ -594,7 +595,7 @@ def setup_workspace(workspace: str) -> None:
     """Write the deterministic sandbox scaffolding for a task.
 
     These files are written once per workspace and then left alone so that
-    retry loops (test_architect or coder failures) do not wipe third-party
+    retry loops (test_designer or coder failures) do not wipe third-party
     dependencies added by the coder node.
 
     The workspace is chowned to the host user identity so that sandbox
@@ -714,52 +715,42 @@ def _parse_file_tags(content: str) -> Dict[str, str]:
 
 
 # =============================================================================
-# NODE: test_architect
+# NODE: test_designer
 # =============================================================================
 @node_with_history
-def test_architect(state: AgenticState):
+def test_designer(state: AgenticState):
     prompt = state["user_prompt"]
     workspace = state.get("workspace_dir", "")
-    critique = state.get("compliance_critique", [])
+    manifest = state.get("file_manifest", {})
+    compliance_critique = state.get("compliance_critique", [])
+    contract_critique = state.get("contract_critique", [])
     sandbox_errors = state.get("sandbox_errors", "")
+    contract_loop = state.get("contract_loop_count", 0)
 
     setup_workspace(workspace)
 
     system = textwrap.dedent(
         """\
-        You are the Test Architect in a strict TDD code-generation pipeline.
+        You are the Test Designer in a strict TDD code-generation pipeline.
 
-        Your job is to produce TWO files from the user's natural-language prompt:
-          1. tests/test_main.py — a complete pytest + Hypothesis property-based test suite.
-          2. src/main.py — a matching skeleton that contains only class/function signatures
-             and `pass` bodies. The skeleton must use type hints and signatures that are
-             EXACTLY compatible with the assertions in tests/test_main.py.
+        Your job: from the user's natural-language prompt, produce a focused
+        baseline test suite in tests/test_main.py.
 
-        Rules for the test suite:
-          - Use Hypothesis @given for invariants and randomized domains.
+        Rules:
+          - Cover every explicit functional requirement in the prompt with at least one test.
+          - Use Hypothesis @given for invariants and randomized domains where appropriate.
           - Add one explicit @given for every rule/guarantee in the prompt.
           - Constrain strategies at the source; never use assume().
           - Use pytest.raises for raise-rule cases.
-          - Write property tests that would reject a lazy, literal, or loophole-seeking
-            implementation. Assume the coder will try to pass with the smallest possible
-            code; close those loopholes by testing implied invariants, adversarial shapes,
-            and edge cases that a robust solution must handle even if the prompt does not
-            list them explicitly.
           - Free-form, tautological, or vacuous assertions are prohibited.
           - Import the implementation from src.main.
           - Every @given test must have @settings(max_examples=50).
           - Recursive Hypothesis strategies must use @st.composite and draw(...).
           - Preserve sub-expression boundaries: parenthesize any fragment inserted into a larger expression.
-
-        Rules for the skeleton:
-          - Only output signatures + pass.
-          - Do not write any algorithmic logic here.
-          - The signatures and type hints must be exactly what the tests expect.
-          - Include src/__init__.py (empty) and tests/__init__.py (empty).
+          - Do NOT generate adversarial or edge-case tests beyond what the prompt explicitly requires.
+          - Do NOT output src/main.py, requirements.txt, or any skeleton.
 
         Output format: wrap each file in exactly:
-          <file name="src/main.py">...</file>
-          <file name="src/__init__.py">...</file>
           <file name="tests/test_main.py">...</file>
           <file name="tests/__init__.py">...</file>
 
@@ -776,52 +767,65 @@ def test_architect(state: AgenticState):
         "hand-write AST renderers or string-composition logic that must preserve "
         "operator precedence; let the language parser be the source of truth."
     )
-    if critique:
+
+    prior_tests = manifest.get("tests/test_main.py", "")
+    if prior_tests:
+        user_prompt += (
+            f"\n\nYour previous tests/test_main.py (contract loop {contract_loop}):\n"
+            f"```python\n{prior_tests}\n```"
+        )
+    if contract_critique:
+        user_prompt += (
+            "\n\nContract compatibility critiques (the skeleton maker could not match these; "
+            "revise your tests to be compatible with the prompt):\n"
+            + "\n".join(f"- {c}" for c in contract_critique)
+        )
+    if compliance_critique:
         user_prompt += (
             "\n\nPrior compliance critiques (the previous implementation was missing these):\n"
-            + "\n".join(f"- {c}" for c in critique)
+            + "\n".join(f"- {c}" for c in compliance_critique)
         )
     if sandbox_errors:
         user_prompt += (
             f"\n\nThe last sandbox run failed with the following errors. "
             f"If the fault is in the tests (syntax, imports, hypothesis health check, vacuity), "
-            f"revise the tests and the matching skeleton:\n{sandbox_errors[:4000]}"
+            f"revise the tests:\n{sandbox_errors[:4000]}"
         )
 
     try:
         content, llm_usage = _invoke_with_retry(
-            "test_architect",
+            "test_designer",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
         )
     except LLMUnavailableError as e:
-        return _handle_llm_unavailable("test_architect", state, e, workspace)
+        return _handle_llm_unavailable("test_designer", state, e, workspace)
 
     files = _parse_file_tags(content)
 
-    # Validate that the required files exist.
-    required = {"src/main.py", "src/__init__.py", "tests/test_main.py", "tests/__init__.py"}
+    # Validate that the required test files exist.
+    required = {"tests/test_main.py", "tests/__init__.py"}
     missing = required - set(files.keys())
     if missing:
         _diag(
             workspace,
-            "test_architect",
+            "test_designer",
             f"Missing required files: {missing}\nRaw response (first 2000 chars):\n{content[:2000]}",
         )
         return {
-            "sandbox_errors": f"Test Architect Error: missing files {sorted(missing)}",
+            "sandbox_errors": f"Test Designer Error: missing files {sorted(missing)}",
             "llm_usage": llm_usage,
             "next_node": "FINISH",
             "thoughts": _think(
                 workspace,
-                "test_architect",
+                "test_designer",
                 f"ERROR: missing files {sorted(missing)}",
             ),
         }
 
     _diag(
         workspace,
-        "test_architect",
+        "test_designer",
         f"Generated files:\n"
         + "\n".join(f"  {fname} ({len(code)} chars)" for fname, code in sorted(files.items())),
     )
@@ -832,11 +836,193 @@ def test_architect(state: AgenticState):
         "sandbox_diagnostics": {},
         "sandbox_loop_count": 0,
         "llm_usage": llm_usage,
+        "next_node": "skeleton_maker",
+        "thoughts": _think(
+            workspace,
+            "test_designer",
+            f"Wrote {len(files)} files: {', '.join(sorted(files.keys()))}",
+        ),
+    }
+
+
+# =============================================================================
+# NODE: skeleton_maker
+# =============================================================================
+@node_with_history
+def skeleton_maker(state: AgenticState):
+    prompt = state["user_prompt"]
+    workspace = state.get("workspace_dir", "")
+    manifest = state.get("file_manifest", {})
+    contract_loop = state.get("contract_loop_count", 0)
+
+    setup_workspace(workspace)
+
+    test_code = manifest.get("tests/test_main.py", "")
+    if not test_code:
+        return {
+            "sandbox_errors": "Skeleton Maker Error: missing tests/test_main.py",
+            "next_node": "FINISH",
+            "thoughts": _think(
+                workspace,
+                "skeleton_maker",
+                "ERROR: missing tests/test_main.py before skeleton creation",
+            ),
+        }
+
+    system = textwrap.dedent(
+        """\
+        You are the Skeleton Maker in a strict TDD code-generation pipeline.
+
+        You are given:
+          1. The user's natural-language prompt.
+          2. A generated tests/test_main.py file.
+
+        Your job:
+          A. Produce src/main.py containing only the minimal function/class signatures
+             and type hints that the tests require. Function bodies must be only
+             `pass` or `raise NotImplementedError`.
+          B. Check whether the tests are compatible with the prompt and with the
+             skeleton you produce.
+
+        Rules for src/main.py:
+          - Match every function/class name and signature called by the tests.
+          - Use type hints exactly as implied by the test assertions.
+          - Do not write any algorithmic logic, helpers, or imports beyond typing and
+            the standard library.
+          - Output an empty src/__init__.py.
+
+        Compatibility check:
+          - If tests call a function, method, or parameter not supported by the prompt,
+            mark incompatible and explain.
+          - If tests expect an exception the prompt does not mention, note it.
+          - If the prompt is ambiguous, pick a consistent interpretation, build the
+            skeleton to match it, and note the ambiguity.
+          - If tests import from a module other than src.main, mark incompatible.
+
+        Output format: wrap each file and verdict in exactly:
+          <file name="src/main.py">...</file>
+          <file name="src/__init__.py">...</file>
+          <contract_verdict>{"compatible": true|false, "critique": ["..."]}</contract_verdict>
+
+        Do not output markdown fences, commentary, or any other files.
+        """
+    )
+
+    user_prompt = f"User prompt:\n{prompt}\n\nTests/test_main.py:\n{test_code}"
+
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "skeleton_maker",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("skeleton_maker", state, e, workspace)
+
+    files = _parse_file_tags(content)
+
+    # Validate that the required skeleton files exist.
+    required = {"src/main.py", "src/__init__.py"}
+    missing = required - set(files.keys())
+    if missing:
+        _diag(
+            workspace,
+            "skeleton_maker",
+            f"Missing required files: {missing}\nRaw response (first 2000 chars):\n{content[:2000]}",
+        )
+        return {
+            "sandbox_errors": f"Skeleton Maker Error: missing files {sorted(missing)}",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(
+                workspace,
+                "skeleton_maker",
+                f"ERROR: missing files {sorted(missing)}",
+            ),
+        }
+
+    # Parse contract verdict.
+    verdict_match = re.search(
+        r"<contract_verdict>\s*(.*?)\s*</contract_verdict>",
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    verdict = {"compatible": True, "critique": []}
+    if verdict_match:
+        try:
+            verdict = json.loads(verdict_match.group(1))
+        except Exception as e:
+            _diag(
+                workspace,
+                "skeleton_maker",
+                f"Failed to parse contract verdict: {e}\nRaw verdict: {verdict_match.group(1)[:500]}",
+            )
+            verdict = {"compatible": False, "critique": ["Could not parse contract verdict"]}
+
+    compatible = bool(verdict.get("compatible", True))
+    raw_critique = verdict.get("critique", []) or []
+    if not isinstance(raw_critique, list):
+        raw_critique = [str(raw_critique)]
+    critique = [str(c) for c in raw_critique if c]
+
+    # Merge skeleton into the existing manifest (tests are preserved).
+    new_manifest = {**manifest, **files}
+
+    _diag(
+        workspace,
+        "skeleton_maker",
+        f"Generated skeleton:\n"
+        + "\n".join(f"  {fname} ({len(code)} chars)" for fname, code in sorted(files.items()))
+        + f"\nContract compatible: {compatible}"
+        + (f"\nCritique: {critique}" if critique else ""),
+    )
+
+    if compatible:
+        return {
+            "file_manifest": new_manifest,
+            "sandbox_errors": "",
+            "sandbox_diagnostics": {},
+            "contract_critique": [],
+            "llm_usage": llm_usage,
+            "next_node": "coder",
+            "thoughts": _think(
+                workspace,
+                "skeleton_maker",
+                f"Skeleton compatible → coder",
+            ),
+        }
+
+    new_contract_loop = contract_loop + 1
+    if new_contract_loop <= MAX_CONTRACT_LOOPS:
+        return {
+            "file_manifest": manifest,
+            "sandbox_errors": "",
+            "sandbox_diagnostics": {},
+            "contract_loop_count": new_contract_loop,
+            "contract_critique": critique,
+            "llm_usage": llm_usage,
+            "next_node": "test_designer",
+            "thoughts": _think(
+                workspace,
+                "skeleton_maker",
+                f"Contract incompatible (loop {new_contract_loop}/{MAX_CONTRACT_LOOPS}) → test_designer: {critique}",
+            ),
+        }
+
+    # Contract loop ceiling reached: proceed to coder with a flag.
+    return {
+        "file_manifest": new_manifest,
+        "sandbox_errors": "",
+        "sandbox_diagnostics": {},
+        "contract_loop_count": new_contract_loop,
+        "contract_critique": critique,
+        "contract_exhausted": True,
+        "llm_usage": llm_usage,
         "next_node": "coder",
         "thoughts": _think(
             workspace,
-            "test_architect",
-            f"Wrote {len(files)} files: {', '.join(sorted(files.keys()))}",
+            "skeleton_maker",
+            f"Contract loop ceiling reached ({MAX_CONTRACT_LOOPS}); proceeding to coder with exhausted flag",
         ),
     }
 
@@ -1286,11 +1472,11 @@ def _route_sandbox_failure(
             "sandbox_diagnostics": diagnostics,
             "sandbox_loop_count": 0,
             "docker_runs": docker_runs,
-            "next_node": "test_architect",
+            "next_node": "test_designer",
             "thoughts": _think(
                 workspace,
                 "sandbox_arbiter",
-                f"Loop {loop}: test-side fault → test_architect",
+                f"Loop {loop}: test-side fault → test_designer",
             ),
         }
 
@@ -1326,18 +1512,18 @@ def _route_sandbox_failure(
             ),
         }
 
-    # Exhausted sandbox loops: replan from test architect.
+    # Exhausted sandbox loops: replan from test designer.
     return {
         "file_manifest": manifest,
         "sandbox_errors": diagnostics.get("raw_output", ""),
         "sandbox_diagnostics": diagnostics,
         "sandbox_loop_count": 0,
         "docker_runs": docker_runs,
-        "next_node": "test_architect",
+        "next_node": "test_designer",
         "thoughts": _think(
             workspace,
             "sandbox_arbiter",
-            f"Loop {loop}: sandbox loop ceiling → test_architect",
+            f"Loop {loop}: sandbox loop ceiling → test_designer",
         ),
     }
 
@@ -1374,11 +1560,11 @@ def _arbiter_failure(
         "sandbox_diagnostics": diagnostics,
         "sandbox_loop_count": 0,
         "docker_runs": docker_runs,
-        "next_node": "test_architect",
+        "next_node": "test_designer",
         "thoughts": _think(
             workspace,
             "sandbox_arbiter",
-            f"Loop {loop}: unrecoverable sandbox fault → test_architect",
+            f"Loop {loop}: unrecoverable sandbox fault → test_designer",
         ),
     }
 
@@ -1504,11 +1690,11 @@ def prompt_compliance_checker(state: AgenticState):
             "sandbox_diagnostics": {},
             "sandbox_loop_count": 0,
             "llm_usage": llm_usage,
-            "next_node": "test_architect",
+            "next_node": "test_designer",
             "thoughts": _think(
                 workspace,
                 "prompt_compliance_checker",
-                f"Compliance FAIL ({new_compliance_loop}/{MAX_COMPLIANCE_LOOPS}) → test_architect: {missing}",
+                f"Compliance FAIL ({new_compliance_loop}/{MAX_COMPLIANCE_LOOPS}) → test_designer: {missing}",
             ),
         }
 

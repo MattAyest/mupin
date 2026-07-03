@@ -16,9 +16,17 @@
 # =============================================================================
 
 nodes:
-    # Designs the test suite and the matching src/main.py skeleton.
-    # WORKLOAD: premium — hardest reasoning + Hypothesis fluency.
-    test_architect:
+    # Designs the lean baseline test suite from the prompt.
+    # WORKLOAD: premium — reasoning about prompt coverage and Hypothesis strategies.
+    test_designer:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.2
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    # Derives the src/main.py skeleton from the generated tests and checks contract compatibility.
+    # WORKLOAD: medium — signature extraction plus compatibility reasoning.
+    skeleton_maker:
         provider: "ollama-cloud"
         model: "kimi-k2.7-code:cloud"
         temperature: 0.2

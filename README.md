@@ -2,10 +2,11 @@
 
 A self-healing Python code-generation microservice. Submit a natural-language prompt and a LangGraph agent:
 
-1. Designs the test suite and a matching skeleton from the prompt.
-2. Implements `src/main.py` against those tests.
-3. Runs ruff, mypy, and pytest inside a hardened Docker sandbox.
-4. Checks that the implementation actually satisfies the original prompt.
+1. Designs a lean baseline test suite from the prompt.
+2. Derives a matching skeleton from those tests and checks contract compatibility.
+3. Implements `src/main.py` against the tests.
+4. Runs ruff, mypy, and pytest inside a hardened Docker sandbox.
+5. Checks that the implementation actually satisfies the original prompt.
 
 If a step fails, the agent routes back to the node that can fix it and tries again. Nodes can also retry themselves when a transient LLM infrastructure fault occurs (timeout, 5xx/524, connection drop), up to the configured `infra_max_retries_per_node`.
 
@@ -16,32 +17,36 @@ If a step fails, the agent routes back to the node that can fix it and tries aga
 ## Architecture
 
 ```
-         ┌─────────────────────────────┐
-         │  (up to infra_max_retries)  │
-         ▼                             │
-test_architect ───────────────────────┤
-      │                               │
-      ▼                               │
-coder ────────────────────────────────┤
-      │                               │
-      ▼                               │
-sandbox_arbiter ───────┐  (up to 5 loops)
-      │                │
-      ▼                │
-prompt_compliance_checker
-      │                │
-      ▼                │
-FINISH ◄───────────────┘
+          ┌─────────────────────────────┐
+          │  (up to infra_max_retries)  │
+          ▼                             │
+ test_designer ───────────────────────┤
+       │                               │
+       ▼                               │
+ skeleton_maker ──────────────────────┤
+       │                               │
+       ▼                               │
+ coder ────────────────────────────────┤
+       │                               │
+       ▼                               │
+ sandbox_arbiter ───────┐  (up to 5 loops)
+       │                │
+       ▼                │
+ prompt_compliance_checker
+       │                │
+       ▼                │
+ FINISH ◄───────────────┘
 ```
 
 ### How it works
 
 | Node | Responsibility | Routes on failure |
 |---|---|---|
-| `test_architect` | Writes `tests/test_main.py`, `src/main.py` skeleton, and init files from the prompt. | `coder` on success; `test_architect` on transient LLM fault; `FINISH` if it cannot emit the required files or after exhausting infra retries. |
+| `test_designer` | Writes a lean `tests/test_main.py` covering the prompt's explicit requirements. | `skeleton_maker` on success; `test_designer` on transient LLM fault; `FINISH` if it cannot emit the required test files. |
+| `skeleton_maker` | Derives `src/main.py` skeleton from the tests and checks prompt/skeleton/test compatibility. | `coder` on success; `test_designer` with a critique if the contract is incompatible (up to 2 loops); `FINISH` if it cannot emit the skeleton. |
 | `coder` | Replaces skeleton bodies with real logic; preserves tests. | `sandbox_arbiter` on success; `coder` on transient LLM fault; `FINISH` if no `src/main.py` is produced. |
-| `sandbox_arbiter` | Installs deps, formats/lints code, runs `mypy` on `src/main.py`, runs pytest. | `coder` for implementation/test/runtime faults; `test_architect` for test-side faults; `FINISH` for infrastructure faults. |
-| `prompt_compliance_checker` | Reads the passing implementation and tests and judges whether every functional requirement in the prompt is covered. | `test_architect` with a critique, up to 2 times; `prompt_compliance_checker` on transient LLM fault; then `FINISH`. |
+| `sandbox_arbiter` | Installs deps, formats/lints code, runs `mypy` on `src/main.py`, runs pytest. | `coder` for implementation/test/runtime faults; `test_designer` for test-side faults; `FINISH` for infrastructure faults. |
+| `prompt_compliance_checker` | Reads the passing implementation and tests and judges whether every functional requirement in the prompt is covered. | `test_designer` with a critique, up to 2 times; `prompt_compliance_checker` on transient LLM fault; then `FINISH`. |
 
 ### Per-node LLM routing
 
@@ -49,7 +54,8 @@ Each node has its own provider/model entry in `llm_config.yaml`. The default con
 
 | Node | Default model | Role |
 |---|---|---|
-| `test_architect` | `kimi-k2.7-code:cloud` | Designs tests + skeleton |
+| `test_designer` | `kimi-k2.7-code:cloud` | Designs baseline tests |
+| `skeleton_maker` | `kimi-k2.7-code:cloud` | Derives skeleton + contract check |
 | `coder` | `kimi-k2.7-code:cloud` | Implements `src/main.py` |
 | `prompt_compliance_checker` | `nemotron-3-nano:30b-cloud` | Semantic prompt check |
 
@@ -209,7 +215,7 @@ The verifier still spawns sibling test containers against the host Docker socket
 
 ## Version history
 
-- **v0.2** (current) — simplified four-node pipeline: `test_architect`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`. Added per-node transient LLM fault retry and self-loop conditional edges.
+- **v0.2** (current) — five-node pipeline: `test_designer`, `skeleton_maker`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`. Added per-node transient LLM fault retry and self-loop conditional edges.
 - **v0.1** — eight-node pipeline with separate architect, test writer, contract verifier, code writer, static analyzer, deterministic verifier, error distiller, and archivist. Recoverable from git history if needed.
 
 ### Latest benchmark snapshot
