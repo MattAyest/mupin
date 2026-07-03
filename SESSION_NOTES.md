@@ -385,6 +385,15 @@ python benchmarks/runner.py --summary
 - Updated `benchmarks/runner.py` diagnostics to bucket `infra_exhausted` separately.
 - Permanent LLM/config errors still surface as `status="failed"`.
 
+### 2026-07-02 — Ollama Cloud non-streaming timeout hypothesis
+
+- Investigated intermittent Ollama Cloud failures (`ReadTimeout`, `RemoteProtocolError`) affecting heavy questions (`csv_parse`, `token_bucket`, `rle`, etc.).
+- Root-cause hypothesis: `src/nodes.py` configures `ChatOllama` with `streaming=False` and `disable_streaming=True`, holding a single long HTTP request open to `api.ollama.com`. When `kimi-k2.7-code:cloud` needs 60–180+ s to emit 14K–20K tokens, the client-side read timeout expires before the response finishes.
+- External evidence:
+  - Ollama issue #3995 reports identical behavior for large models with `stream=false`; streaming resolved it.
+  - Project `berthmc/presentations` fixed 300 s false timeouts by switching Ollama chat to `stream:true` so the HTTP read timeout resets between chunks.
+- Proposed experiment: enable streaming for the `ollama-cloud` provider (`streaming=True`, drop `disable_streaming=True`) and re-run heavy benchmark questions. Fallback: raise per-attempt read timeout or use a streaming-aware HTTP client.
+
 ### 2026-07-01 — self-loop conditional edge fix
 
 - Fixed `KeyError('test_architect')` crash that killed tasks during infra retry.

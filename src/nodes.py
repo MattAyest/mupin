@@ -207,8 +207,7 @@ def _build_llm(node_name):
             model=model,
             temperature=temperature,
             base_url=base_url,
-            streaming=False,
-            disable_streaming=True,
+            streaming=True,
             client_kwargs=client_kwargs,
         )
 
@@ -327,7 +326,7 @@ def _invoke_with_retry(
     provider = node_config.get("provider")
     model = node_config.get("model", "unknown")
     ollama_providers = ("ollama-cloud", "ollama")
-    invoke_kwargs = {"stream": False} if provider in ollama_providers else {}
+    invoke_kwargs = {"stream": True} if provider in ollama_providers else {}
 
     input_tokens = _count_message_tokens(messages)
     usage_entries: list[dict] = []
