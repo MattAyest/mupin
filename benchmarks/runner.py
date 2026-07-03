@@ -26,7 +26,7 @@ RESULTS_FILE = Path(__file__).parent / "results.jsonl"
 METRICS_FILE = Path(__file__).parent / "metrics.jsonl"
 
 POLL_INTERVAL = 5   # seconds between status polls
-TIMEOUT = 1200      # seconds before we give up on a single task (20 min)
+TIMEOUT = 2400      # seconds before we give up on a single task (40 min)
                     # Expert/hard questions may override this via questions.json
 
 

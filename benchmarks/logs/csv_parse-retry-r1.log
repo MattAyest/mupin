@@ -1,0 +1,57 @@
+
+Benchmark run: run_20260701_173410
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-retry-1
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_2284b041
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    110.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    125.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    145.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    180.1s  → coder  (sandbox_loops=1 compliance_loops=0)
+    195.1s  → sandbox_arbiter  (sandbox_loops=2 compliance_loops=0)
+    220.1s  → coder  (sandbox_loops=2 compliance_loops=0)
+    230.1s  → sandbox_arbiter  (sandbox_loops=3 compliance_loops=0)
+    275.2s  → coder  (sandbox_loops=3 compliance_loops=0)
+    290.2s  → sandbox_arbiter  (sandbox_loops=4 compliance_loops=0)
+    310.2s  → coder  (sandbox_loops=4 compliance_loops=0)
+    320.2s  → sandbox_arbiter  (sandbox_loops=0 compliance_loops=0)
+    560.3s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    725.4s  → coder  (sandbox_loops=0 compliance_loops=0)
+    750.5s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+   1055.7s  → coder  (sandbox_loops=1 compliance_loops=0)
+   1070.7s  → sandbox_arbiter  (sandbox_loops=2 compliance_loops=0)
+
+  FAIL  in 1455.9s  |  sandbox_loops=2  compliance_loops=0  files=0
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_173410)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  csv_parse            hard     FAIL        1455.9s     2     0      0
+──────────────────────────────────────────────────────────────────────
+  0/1 passed   total time: 1455.9s   avg: 1455.9s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_173410)
+######################################################################
+
+  Failure mode counts:
+    llm_fault:'coder': 1
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  coder                         13      6   985.1s     44487     20064     64551
+  test_architect                 3      1   342.7s      4302     26953     31255
+
+  Docker runs: 7   total sandbox time: 32.2s   avg: 4.6s
+######################################################################
+

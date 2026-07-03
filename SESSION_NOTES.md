@@ -304,6 +304,32 @@ python benchmarks/runner.py --summary
   failures seen on strategy-heavy questions like `csv_parse`. Reverted because it is a prompt change
   the user did not request; kept as a note in case future runs continue to show this failure mode.
 
+
+
+### 2026-07-03 — plan to split `test_architect` into baseline + hardening phases
+
+**Problem identified:** The `test_architect` node is overloaded. Its prompt mixes two jobs:
+1. Design a lean baseline test suite that satisfies the explicit prompt.
+2. Design adversarial/edge-case tests that reject lazy or loophole-seeking implementations.
+
+Because both jobs run up front for every question, generation and pytest times are inflated, and hard questions frequently hit runner timeouts. The 2026-07-01 anti-lazy prompt change traded speed for correctness coverage.
+
+**Planned structural change:** Split `test_architect` into two responsibilities:
+- A fast baseline phase/node that produces only prompt-covering tests + skeleton.
+- A conditional hardening phase/node that adds adversarial tests only when a passing implementation is detected as shallow or incomplete.
+
+**Candidate designs:**
+- **Option A — two nodes:** `test_designer` (baseline) and `test_hardening` (conditional adversarial tests).
+- **Option B — single node, two-phase:** `test_architect` returns baseline first; a second pass is triggered only if needed.
+- **Option C — oracle-driven adaptive loop:** Use `prompt_compliance_checker` as the oracle to decide whether hardening is required.
+
+**Recommended approach:** Start with **Option A** for clarity, routing through `test_hardening` only when `prompt_compliance_checker` reports missing coverage or a shallow implementation passes the baseline.
+
+**Open questions before implementation:**
+- Which model should the hardening node use? Same heavy model, or a cheaper/faster one?
+- Should hardening be triggered by explicit compliance failures, heuristics, or both?
+- How does this interact with the current `test_fault` → `test_architect` retry path?
+
 ### 2026-06-30 — calculator expression-generation guidance
 
 - Updated `test_architect` user prompt in `src/nodes.py` with language-specific guidance:

@@ -1,0 +1,40 @@
+
+Benchmark run: run_20260701_175826
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-retry-2
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_c9dffd0e
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    230.2s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+
+  FAIL  in 610.3s  |  sandbox_loops=0  compliance_loops=0  files=0
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_175826)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  csv_parse            hard     FAIL         610.3s     0     0      0
+──────────────────────────────────────────────────────────────────────
+  0/1 passed   total time: 610.3s   avg: 610.3s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_175826)
+######################################################################
+
+  Failure mode counts:
+    llm_fault:'coder': 1
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  coder                          3      3   377.3s      7083         0      7083
+  test_architect                 2      1   223.8s      1464     17630     19094
+######################################################################
+

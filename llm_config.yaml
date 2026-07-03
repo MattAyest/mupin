@@ -53,4 +53,4 @@ docker:
 server:
     # Hard wall-clock backstop per task (seconds). The orchestrator auto-cancels
     # a task that exceeds this, even if the client never called /cancel.
-    task_deadline_seconds: 3600
+    task_deadline_seconds: 7200

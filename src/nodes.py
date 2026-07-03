@@ -97,12 +97,14 @@ SUPPORTED_PROVIDERS = (
     "openai-compatible",
 )
 
-SANDBOX_DEPS = (
+# Kept as a list (not a tuple) so later code can concatenate it with a list of
+# extra requirements without a TypeError on tuple+list.
+SANDBOX_DEPS = [
     "pytest",
     "hypothesis",
     "ruff",
     "mypy",
-)
+]
 # Base tools are invoked inside the test container as `python -m <tool>` using
 # PYTHONPATH=/workspace/.deps, because `pip install --target` does not put
 # console scripts on PATH.

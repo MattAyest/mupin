@@ -1,0 +1,197 @@
+======================================================================
+Starting run 6/7: full-suite-7x-r6
+Started at: 2026-07-01T02:21:54Z
+======================================================================
+
+Benchmark run: run_20260701_032154
+Questions:     12
+API:           http://localhost:8000
+Label:         full-suite-7x-r6
+
+────────────────────────────────────────────────────────────
+  [fibonacci]  difficulty=easy
+  Write a Python module with a single function `fibonacci(n: int) -> list[int]` that returns the first...
+────────────────────────────────────────────────────────────
+  task_id=task_8636132f
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     20.0s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+     25.0s  → coder  (sandbox_loops=0 compliance_loops=0)
+     35.0s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+     40.0s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 40.0s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [stack]  difficulty=easy
+  Write a Python module implementing a Stack class with methods: push(item), pop() -> item, peek() -> ...
+────────────────────────────────────────────────────────────
+  task_id=task_78ad00ea
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     25.0s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+     30.0s  → coder  (sandbox_loops=0 compliance_loops=0)
+     40.0s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+     45.0s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 45.0s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [merge_sorted]  difficulty=easy
+  Write a Python module with a function `merge_sorted(a: list[int], b: list[int]) -> list[int]` that m...
+────────────────────────────────────────────────────────────
+  task_id=task_1c1c4eb0
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    115.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    120.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    130.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    135.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 135.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [calculator]  difficulty=medium
+  Write a Python module with a function `calculate(expression: str) -> float` that evaluates a simple ...
+────────────────────────────────────────────────────────────
+  task_id=task_1baa8c7e
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    110.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    175.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    190.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 190.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [word_frequency]  difficulty=medium
+  Write a Python module with a function `word_frequency(text: str) -> dict[str, int]` that returns a d...
+────────────────────────────────────────────────────────────
+  task_id=task_a0e16594
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     95.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+
+  FAIL  in 645.4s  |  sandbox_loops=0  compliance_loops=0  files=0
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_de6b2ed1
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    130.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    145.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    155.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    165.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 165.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [graph]  difficulty=hard
+  Write a Python module implementing a directed Graph class with methods: add_edge(u, v), dfs(start) -...
+────────────────────────────────────────────────────────────
+  task_id=task_750a3f9f
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    100.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    120.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    130.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    135.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 135.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [evaluator]  difficulty=hard
+  Write a Python module with a function `evaluate(expression: str) -> float` that evaluates an arithme...
+────────────────────────────────────────────────────────────
+  task_id=task_f5a130c3
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+
+  FAIL  in 550.4s  |  sandbox_loops=0  compliance_loops=0  files=0
+
+────────────────────────────────────────────────────────────
+  [token_bucket]  difficulty=expert
+  Write a Python module implementing a TokenBucket class. The constructor is TokenBucket(capacity: int...
+────────────────────────────────────────────────────────────
+  task_id=task_a6b15e89
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    100.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    115.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    120.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    125.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 125.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [min_heap]  difficulty=expert
+  Write a Python module implementing a MinHeap class with methods push(item), pop() -> item (remove an...
+────────────────────────────────────────────────────────────
+  task_id=task_79950ad6
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     45.0s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+     50.0s  → coder  (sandbox_loops=0 compliance_loops=0)
+     60.0s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+     95.1s  → coder  (sandbox_loops=1 compliance_loops=0)
+    105.1s  → sandbox_arbiter  (sandbox_loops=2 compliance_loops=0)
+    110.1s  → prompt_compliance_checker  (sandbox_loops=2 compliance_loops=0)
+
+  PASS  in 110.1s  |  sandbox_loops=2  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [bounded_queue]  difficulty=expert
+  Write a Python module implementing a thread-safe BoundedQueue(maxsize: int) supporting blocking put(...
+────────────────────────────────────────────────────────────
+  task_id=task_2b90a7b9
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     85.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+     90.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    105.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    110.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 110.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+────────────────────────────────────────────────────────────
+  [rle]  difficulty=expert
+  Write a Python module with two functions: rle_encode(data: str) -> str and rle_decode(data: str) -> ...
+────────────────────────────────────────────────────────────
+  task_id=task_966c1c5f
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     85.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    115.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    125.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+    135.1s  → prompt_compliance_checker  (sandbox_loops=1 compliance_loops=0)
+
+  PASS  in 135.1s  |  sandbox_loops=1  compliance_loops=0  files=4
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_032154)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  fibonacci            easy     PASS          40.0s     1     0      4
+  stack                easy     PASS          45.0s     1     0      4
+  merge_sorted         easy     PASS         135.1s     1     0      4
+  calculator           medium   PASS         190.1s     1     0      4
+  word_frequency       medium   FAIL         645.4s     0     0      0
+  csv_parse            hard     PASS         165.1s     1     0      4
+  graph                hard     PASS         135.1s     1     0      4
+  evaluator            hard     FAIL         550.4s     0     0      0
+  token_bucket         expert   PASS         125.1s     1     0      4
+  min_heap             expert   PASS         110.1s     2     0      4
+  bounded_queue        expert   PASS         110.1s     1     0      4
+  rle                  expert   PASS         135.1s     1     0      4
+──────────────────────────────────────────────────────────────────────
+  10/12 passed   total time: 2386.6s   avg: 198.9s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_032154)
+######################################################################
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  coder                         14      3   740.0s     20400     21710     42110
+  prompt_compliance_checker     10      0    49.4s     16248      5508     21756
+  test_architect                14      3  1425.7s      8502    105052    113554
+
+  Docker runs: 11   total sandbox time: 30.3s   avg: 2.8s
+######################################################################
+
+Finished run 6/7: full-suite-7x-r6 at 2026-07-01T03:01:41Z
+

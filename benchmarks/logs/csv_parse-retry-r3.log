@@ -1,0 +1,318 @@
+
+Benchmark run: run_20260701_180836
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-retry-3
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_2a1ea485
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    115.1s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    125.1s  → coder  (sandbox_loops=0 compliance_loops=0)
+    140.1s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+  POLL ERROR: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer')) — retrying in 5s
+  POLL ERROR: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer')) — retrying in 5s
+  POLL ERROR: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer')) — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+  POLL ERROR: 404 Client Error: Not Found for url: http://localhost:8000/task/task_2a1ea485 — retrying in 5s
+
+  TIMEOUT after 1800.9s — cancelled (per-question limit=1800s, last node=sandbox_arbiter sandbox_loops=1)
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_180836)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  csv_parse            hard     FAIL        1800.9s     1     0      0
+──────────────────────────────────────────────────────────────────────
+  0/1 passed   total time: 1800.9s   avg: 1800.9s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_180836)
+######################################################################
+
+  Failure mode counts:
+    timeout: 1
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  coder                          1      0    11.0s      1953       947      2900
+  test_architect                 1      0   111.2s       642     13855     14497
+
+  Docker runs: 1   total sandbox time: 4.8s   avg: 4.8s
+######################################################################
+

@@ -1,0 +1,12 @@
+
+Benchmark run: run_20260701_195440
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-verify-2
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_6404f236
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)

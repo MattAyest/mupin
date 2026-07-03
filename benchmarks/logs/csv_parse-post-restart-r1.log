@@ -1,0 +1,15 @@
+
+Benchmark run: run_20260701_192238
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-post-restart-1
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_d1563de2
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    355.2s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    365.2s  → coder  (sandbox_loops=0 compliance_loops=0)
+    385.2s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)

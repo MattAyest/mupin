@@ -1,0 +1,44 @@
+
+Benchmark run: run_20260701_194625
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-verify-1
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_10bdc2c7
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+    290.2s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+    360.2s  → coder  (sandbox_loops=0 compliance_loops=0)
+    375.2s  → sandbox_arbiter  (sandbox_loops=1 compliance_loops=0)
+
+  FAIL  in 495.3s  |  sandbox_loops=1  compliance_loops=0  files=0
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_194625)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  csv_parse            hard     FAIL         495.3s     1     0      0
+──────────────────────────────────────────────────────────────────────
+  0/1 passed   total time: 495.3s   avg: 495.3s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_194625)
+######################################################################
+
+  Failure mode counts:
+    can only concatenate tuple (not "list") to tuple: 1
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  coder                          1      0    68.2s      1808       300      2108
+  test_architect                 1      0   289.6s       822      1420      2242
+
+  Docker runs: 1   total sandbox time: 2.2s   avg: 2.2s
+######################################################################
+

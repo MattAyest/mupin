@@ -1,0 +1,39 @@
+
+Benchmark run: run_20260701_201500
+Questions:     1
+API:           http://localhost:8000
+Label:         csv_parse-fresh-3
+
+────────────────────────────────────────────────────────────
+  [csv_parse]  difficulty=hard
+  Write a Python module with a function `parse_csv(text: str) -> list[dict]` that parses a CSV string ...
+────────────────────────────────────────────────────────────
+  task_id=task_7489c88a
+      0.0s  → initializing  (sandbox_loops=0 compliance_loops=0)
+     15.0s  → test_architect  (sandbox_loops=0 compliance_loops=0)
+
+  FAIL  in 15.0s  |  sandbox_loops=0  compliance_loops=0  files=0
+
+══════════════════════════════════════════════════════════════════════
+  RUN SUMMARY  (run_20260701_201500)
+══════════════════════════════════════════════════════════════════════
+  ID                   DIFF     STATUS         TIME  SBOX  COMP  FILES
+  ──────────────────── ──────── ────────── ────────  ────  ────  ─────
+  csv_parse            hard     FAIL          15.0s     0     0      0
+──────────────────────────────────────────────────────────────────────
+  0/1 passed   total time: 15.0s   avg: 15.0s
+══════════════════════════════════════════════════════════════════════
+
+
+######################################################################
+  DIAGNOSTIC SUMMARY  (run_20260701_201500)
+######################################################################
+
+  Failure mode counts:
+    LLM infrastructure permanent fault for test_architect exhaus: 1
+
+  NODE                       CALLS ERRORS     TIME   IN_TOK  OUT_TOK  TOT_TOK
+  ────────────────────────── ───── ────── ──────── ──────── ──────── ────────
+  test_architect                 3      3     3.8s      2466         0      2466
+######################################################################
+
