@@ -507,7 +507,160 @@ now; the focus is on reducing first-pass generation time and improving test/skel
 
 ---
 
-## 11. Legacy: v0.1 Pipeline
+## 11. Language Profile Refactor (Planned)
+
+### Goal
+Make the Coding Module language-agnostic by extracting all language-specific
+conventions (file paths, sandbox image, test runner, linter, prompts) into a
+pluggable profile system. **Step 1 implements Python only;** no second language is
+added yet. The second language remains in planning/session notes.
+
+### Why now
+All current hard-coded assumptions are Python-specific:
+- File paths: `src/main.py`, `tests/test_main.py`, `src/__init__.py`
+- Import path: `from src.main import ...`
+- Sandbox image: `python:3.11-slim`
+- Tools: `pytest`, `ruff`, `mypy`, `hypothesis`
+- Dependency file: `requirements.txt`
+- Workspace setup: `conftest.py`, `pytest.ini`
+- Prompt examples and rules reference Python syntax
+
+A profile system lets us add a second language later without scattering
+language-specific conditionals across `nodes.py`.
+
+### Step 1 design
+
+#### 1. New file: `coding-module/profiles/python.yaml`
+Contains the complete Python profile:
+
+```yaml
+name: python
+display_name: Python 3.11
+default: true
+
+sandbox:
+  image: python:3.11-slim
+  deps_file: requirements.txt
+  default_deps:
+    - pytest
+    - hypothesis
+    - ruff
+    - mypy
+  setup_command: |
+    pip install -q --target /workspace/.deps -r /workspace/requirements.txt
+  run_command: |
+    python -m ruff format {{source_main}}
+    python -m ruff format {{test_main}}
+    python -m ruff check --fix {{source_main}}
+    python -m ruff check --fix {{test_main}}
+    python -m mypy --ignore-missing-imports {{source_main}}
+    python -m pytest {{test_main}} -p no:cacheprovider --hypothesis-seed=42 --hypothesis-profile=sandbox
+
+files:
+  source_dir: src
+  test_dir: tests
+  source_main: src/main.py
+  test_main: tests/test_main.py
+  source_init: src/__init__.py
+  test_init: tests/__init__.py
+  manifest:
+    - src/main.py
+    - src/__init__.py
+    - tests/test_main.py
+    - tests/__init__.py
+    - requirements.txt
+
+prompts:
+  import_path: src.main
+  source_file: src/main.py
+  test_file: tests/test_main.py
+  test_framework: pytest
+  property_library: hypothesis
+  linter: ruff
+  type_checker: mypy
+  deps_file: requirements.txt
+
+  test_designer_system: |
+    <role>
+    You are the Test Designer in a strict test-driven Python code-generation pipeline.
+    ... (full prompt) ...
+    </role>
+    ...
+
+  skeleton_maker_system: |
+    ...
+
+  coder_system: |
+    ...
+
+  compliance_checker_system: |
+    ...
+```
+
+#### 2. New file: `coding-module/src/profile.py`
+A small loader that:
+- Reads `profiles/<name>.yaml`
+- Validates required keys
+- Exposes profile values as typed attributes
+- Falls back to `python` if the requested profile is missing
+
+```python
+from pathlib import Path
+import yaml
+
+PROFILE_DIR = Path(__file__).with_suffix("").parent.parent / "profiles"
+
+class Profile:
+    ...
+
+def get_profile(name: str = "python") -> Profile:
+    ...
+```
+
+#### 3. Refactor `coding-module/src/nodes.py`
+- Replace every hard-coded file path (`src/main.py`, `tests/test_main.py`, etc.)
+  with lookups from the active profile.
+- Replace the hard-coded sandbox command block with the profile's
+  `run_command` template.
+- Load system prompts from the profile instead of inline strings.
+- Keep node logic (manifest handling, loop routing, verdict parsing) unchanged.
+
+#### 4. Refactor `coding-module/src/api.py`
+- Accept optional `language` field in `POST /task` request body.
+- Default to `python` if not provided.
+- Store `profile_name` in the initial task state.
+
+#### 5. Refactor `coding-module/src/state.py`
+- Add `profile_name: str` to `AgenticState`.
+
+### What Step 1 does NOT do
+- Does not add a second language profile.
+- Does not change the Python sandbox image or tools.
+- Does not change Python prompt behavior.
+- Does not alter the Dockerfile or docker-compose.yml.
+
+### Step 2 (planned, not implemented)
+Choose one second language (e.g., JavaScript/TypeScript or Go) and:
+- Create `profiles/<lang>.yaml`.
+- Add a small benchmark set for that language.
+- Extend `sandbox_arbiter` if the profile's `run_command` isn't enough on its own.
+- Document any language-specific edge cases in this section.
+
+### Verification for Step 1
+After the refactor:
+1. `python -m py_compile` on all `src/*.py` files.
+2. `docker compose up --build` to confirm the API starts.
+3. Run the medium benchmark suite; expect pass rate and runtime unchanged.
+
+### Files changed in Step 1
+- `coding-module/src/nodes.py` (refactored)
+- `coding-module/src/api.py` (language parameter)
+- `coding-module/src/state.py` (profile_name field)
+- `coding-module/src/profile.py` (new)
+- `coding-module/profiles/python.yaml` (new)
+- `coding-module/SESSION_NOTES.md` (this entry)
+
+## 12. Legacy: v0.1 Pipeline
 
 The previous system used eight nodes: `workspace_loader` → `architect_node` → `test_writer` ↔ `contract_verifier` → `code_writer` ↔ `static_analyzer` → `deterministic_verifier` → `error_distiller` → `archivist_node` / `FINISH`.
 
