@@ -305,6 +305,66 @@ python benchmarks/runner.py --summary
 
 ## 10. Prompt Change Log
 
+### 2026-07-03 — system-prompt rewrite across v0.2 nodes (Anthropic best practices)
+
+**Problem:** The system prompts in `src/nodes.py` relied on negative rule lists
+("Do NOT...", "never...", "prohibited..."), had no in-context examples, and lacked
+XML structure and self-check steps. This contributed to weak or brittle test
+generation. For example, `merge_sorted` tests only checked `result == sorted(result)`
+(missing black-box coverage of input preservation and completeness), while earlier
+`test_architect` tests tried to monkeypatch `list.sort`, which crashes on Python 3.11.
+Hard questions like `csv_parse` also hit Hypothesis API mismatches (mixing deprecated
+`whitelist/blacklist` with newer `include/exclude` arguments).
+
+**Change:** Rewrote the system prompts for `test_designer`, `skeleton_maker`, `coder`,
+and `prompt_compliance_checker` in `coding-module/src/nodes.py`:
+- XML-structured sections: `<role>`, `<goal>`, `<inputs>`, `<rules>`, `<examples>`,
+  `<output_format>`, `<quality_check>`.
+- Positive framing of rules, with explanations for necessary prohibitions.
+- Added 2–3 in-context examples per prompt.
+- Added a self-check step before finishing.
+- Added a rule forbidding mixing of deprecated and current Hypothesis API arguments.
+- Kept rules language-agnostic where possible while preserving Python output format.
+
+**Example of the new `test_designer` structure:**
+
+```xml
+<role>
+You are the Test Designer in a strict test-driven code-generation pipeline.
+Your job is to produce a focused baseline test suite in tests/test_main.py.
+</role>
+
+<goal>
+Write tests that:
+1. Cover every explicit functional requirement in the user prompt with at least one test.
+2. Exercise invariants and randomized domains using Hypothesis @given where appropriate.
+3. Use pytest.raises for raise-rule cases.
+4. Output only tests/test_main.py and tests/__init__.py.
+</goal>
+
+<rules>
+- Use @settings(max_examples=50) on every @given test.
+- Constrain Hypothesis strategies at the source; never use assume().
+- Import the implementation from src.main.
+- Write assertions directly: assert x == y, not assert (x) == (y).
+- Use black-box property tests only. Do not monkeypatch, mock, or subclass
+  built-in types or methods to enforce implementation details.
+- Do not use pytest fixtures inside @given tests.
+- For expression evaluators, calculators, parsers, or similar tasks, generate raw
+  expression strings and compute expected values using the target language's
+  standard evaluator in a safe scope.
+- Do not output src/main.py, requirements.txt, or any skeleton.
+</rules>
+```
+
+Full prompts are in `coding-module/src/nodes.py`.
+
+**Verification planned:** Run the medium suite first, then the full 12-question suite
+three times. Compare pass rate, runtime, and test quality against the partial
+full-12-r1 baseline and the old `test_architect` runs.
+
+**Files changed:** `coding-module/src/nodes.py`, `coding-module/SESSION_NOTES.md`.
+
 ### 2026-07-01 — anti-lazy test contract + resilience tuning
 
 - Updated `test_designer` system prompt in `src/nodes.py`:
