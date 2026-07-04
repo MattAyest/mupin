@@ -674,7 +674,66 @@ After the refactor:
 - `coding-module/llm_config.yaml` (remove docker runtime section)
 - `coding-module/SESSION_NOTES.md` (this entry)
 
-## 12. Legacy: v0.1 Pipeline
+## 12. Production-Readiness Benchmark Goal (Initial)
+
+To declare the Coding Module production-ready, the system must demonstrate
+consistent performance across four benchmark tiers.
+
+### Tier 1 — Smoke regression
+- Run 5 easy/medium questions: `fibonacci`, `stack`, `merge_sorted`, `calculator`,
+  `word_frequency`.
+- Target: 5/5 pass in under 15 minutes total.
+- Run after every prompt, architecture, or dependency change.
+
+### Tier 2 — Custom regression suite
+- Run the full custom suite three times.
+- Initial target while the suite is 12 questions: ≥ 90% pass rate (32/36) with
+  no question failing in all 3 runs.
+- The suite should be expanded to **20 questions** as we approach 100% on the
+  current 12; the same ≥ 90% target applies to the larger set.
+- Latency target: average round ≤ 45 minutes; easy/medium questions ≤ 10
+  minutes each.
+
+### Tier 3 — Standard Python benchmark
+- Run HumanEval+ (or BigCodeBench if dependency cost is acceptable).
+- Initial target for the current model (`kimi-k2.7-code:cloud`):
+  - HumanEval+ pass@1 ≥ 60%.
+  - BigCodeBench pass@1 ≥ 40% (optional, higher cost).
+- Purpose: compare against published baselines and catch distribution shift.
+
+### Tier 4 — Stress / edge-case suite
+- Curated 10 questions covering:
+  - Concurrency: `bounded_queue`, rate limiters.
+  - Parsing: `csv_parse`, expression evaluators, JSON parsers.
+  - Library usage: optional DS-1000 or BigCodeBench subset if data science is a
+    target domain.
+- Target: ≥ 80% pass.
+
+### Quality gates
+Beyond pass rate, production-readiness also requires:
+1. No sandbox flakiness: each stress/concurrency question passes in 2/3
+   consecutive runs.
+2. One-loop success: ≥ 70% of tasks pass on the first sandbox loop.
+3. Test quality: generated tests catch lazy implementations (e.g. `merge_sorted`
+   returning `sorted(a+b)`).
+4. Dependency hygiene: no manual `requirements.txt` fixes after generation.
+5. Determinism: same prompt yields the same pass/fail outcome ≥ 80% of the time.
+
+### Current status
+- Tier 2 custom suite: recently achieved 11/12 in early runs; 12/12 looks
+  reachable with the new profile system. Plan to expand to 20 questions once
+  the current set is stable at 100%.
+- Tier 1 smoke suite: already passes consistently.
+- Tiers 3 and 4: not yet implemented or measured.
+
+### Next steps
+1. Lock in Tier 2 performance by completing the current 3× full-suite run.
+2. Expand the custom suite from 12 to 20 questions.
+3. Add a HumanEval+ runner to `coding-module/benchmarks/`.
+4. Build the 10-question stress suite and measure baseline.
+5. Iterate prompts/profiles until all targets are met.
+
+## 13. Legacy: v0.1 Pipeline
 
 The previous system used eight nodes: `workspace_loader` → `architect_node` → `test_writer` ↔ `contract_verifier` → `code_writer` ↔ `static_analyzer` → `deterministic_verifier` → `error_distiller` → `archivist_node` / `FINISH`.
 
