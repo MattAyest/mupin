@@ -2,6 +2,7 @@ import ast
 import asyncio
 import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -71,6 +72,13 @@ INFRA_MAX_RETRIES = int(RESILIENCE.get("infra_max_retries_per_node", 5))
 INFRA_BACKOFFS = [
     float(x) for x in RESILIENCE.get("infra_retry_backoff_seconds", [10, 30, 60, 120, 120])
 ]
+
+# Streaming liveness watchdog: abort an LLM call if no new chunk arrives within
+# this many seconds.  Catches mid-stream Ollama Cloud stalls (observed hanging
+# for ~900s emitting zero tokens) without cutting off legitimately slow-but-
+# progressing generations (max observed successful call is ~561s, but those
+# stream continuously).  Tunable per-node via llm_config.yaml `stream_idle_seconds`.
+STREAM_IDLE_DEFAULT = float(RESILIENCE.get("stream_idle_seconds", 120.0))
 
 # HTTP status codes and error names that we treat as transient provider faults.
 TRANSIENT_HTTP_STATUSES = {502, 503, 504, 524}
@@ -350,25 +358,87 @@ def _invoke_with_retry(
         try:
             llm = get_llm(node_name)
 
-            def _call():
-                response = llm.invoke(messages, **invoke_kwargs)
-                content = response.content if hasattr(response, "content") else ""
-                metadata = getattr(response, "response_metadata", {}) or {}
-                return content, metadata
+            # Streaming liveness watchdog: consume the LLM stream chunk-by-chunk
+            # in a worker thread and abort if no chunk arrives within
+            # `stream_idle_seconds`.  This catches mid-stream Ollama Cloud stalls
+            # (observed hanging ~900s emitting zero tokens) while letting slow-
+            # but-progressing generations run up to the total `timeout_seconds`
+            # wall-clock budget.  Non-streaming providers fall back to a single
+            # chunk that returns the whole response, so the watchdog still
+            # bounds them by `stream_idle_seconds` for the first byte and
+            # `timeout_seconds` for the whole call.
+            stream_idle = float(
+                node_config.get("stream_idle_seconds", STREAM_IDLE_DEFAULT)
+            )
+
+            chunk_queue: "queue.Queue" = queue.Queue()
+            use_streaming = bool(invoke_kwargs.get("stream"))
+
+            def _stream_call():
+                try:
+                    if use_streaming:
+                        # Explicit stream() returns an iterator of AIMessageChunk;
+                        # consume it here so the watchdog sees each chunk.
+                        metadata: dict = {}
+                        parts: list[str] = []
+                        for chunk in llm.stream(messages):
+                            piece = getattr(chunk, "content", None)
+                            if isinstance(piece, str) and piece:
+                                parts.append(piece)
+                                chunk_queue.put(("chunk", piece))
+                            cm = getattr(chunk, "response_metadata", None)
+                            if isinstance(cm, dict) and cm:
+                                metadata = cm
+                        content = "".join(parts)
+                        chunk_queue.put(("done", (content, metadata)))
+                    else:
+                        response = llm.invoke(messages)
+                        content = response.content if hasattr(response, "content") else ""
+                        metadata = getattr(response, "response_metadata", {}) or {}
+                        chunk_queue.put(("done", (content, metadata)))
+                except BaseException as e:  # noqa: BLE001 - propagate to consumer
+                    chunk_queue.put(("error", e))
 
             if executor is not None:
-                future = executor.submit(_call)
+                future = executor.submit(_stream_call)
             else:
                 local_executor = ThreadPoolExecutor(max_workers=1)
-                future = local_executor.submit(_call)
+                future = local_executor.submit(_stream_call)
 
+            content = ""
+            metadata: dict = {}
+            stream_error: Exception | None = None
+            stream_done = False
             try:
-                content, metadata = future.result(timeout=timeout_seconds)
+                while not stream_done:
+                    remaining = timeout_seconds - (time.perf_counter() - started)
+                    if remaining <= 0:
+                        raise FutureTimeoutError(
+                            f"Wall-clock timeout after {timeout_seconds}s"
+                        )
+                    wait = min(stream_idle, remaining)
+                    try:
+                        kind, payload = chunk_queue.get(timeout=wait)
+                    except queue.Empty:
+                        raise FutureTimeoutError(
+                            f"Stream idle timeout after {wait:.0f}s with no chunk"
+                        )
+                    if kind == "chunk":
+                        content += payload
+                    elif kind == "done":
+                        content, metadata = payload
+                        stream_done = True
+                    elif kind == "error":
+                        stream_error = payload
+                        stream_done = True
             finally:
                 if executor is None:
                     local_executor.shutdown(wait=False, cancel_futures=True)
                 elif cancel_event is not None and cancel_event.is_set():
                     future.cancel()
+
+            if stream_error is not None:
+                raise stream_error
 
             elapsed = time.perf_counter() - started
             output_tokens = _estimate_tokens(content)
@@ -422,14 +492,14 @@ def _invoke_with_retry(
                 "input_tokens": input_tokens,
                 "output_tokens": 0,
                 "total_tokens": input_tokens,
-                "error": f"Wall-clock timeout after {timeout_seconds}s",
+                "error": str(e) or f"Wall-clock timeout after {timeout_seconds}s",
                 "response_metadata": {},
             })
             if workspace:
                 _diag(
                     workspace,
                     node_name,
-                    f"LLM attempt {attempt}/{max_attempts} timed out after {timeout_seconds}s",
+                    f"LLM attempt {attempt}/{max_attempts} timed out: {e}",
                 )
         except Exception as e:
             last_error = e

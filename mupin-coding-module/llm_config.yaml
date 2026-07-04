@@ -52,6 +52,17 @@ loop_limits:
     max_sandbox_loops: 5
     max_compliance_loops: 2
 
+resilience:
+    # Per-node infra retries for transient LLM faults (timeouts, 5xx, conn drops).
+    infra_max_retries_per_node: 5
+    infra_retry_backoff_seconds: [10, 30, 60, 120, 120]
+    # Streaming liveness watchdog: abort an LLM call if no new stream chunk
+    # arrives within this many seconds.  Catches mid-stream Ollama Cloud stalls
+    # (observed hanging ~900s emitting zero tokens) without cutting off slow-
+    # but-progressing generations.  Override per-node via the node's config:
+    #   stream_idle_seconds: 60
+    stream_idle_seconds: 120
+
 server:
     # Hard wall-clock backstop per task (seconds). The orchestrator auto-cancels
     # a task that exceeds this, even if the client never called /cancel.

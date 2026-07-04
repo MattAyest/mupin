@@ -467,6 +467,37 @@ now; the focus is on reducing first-pass generation time and improving test/skel
   - Project `berthmc/presentations` fixed 300 s false timeouts by switching Ollama chat to `stream:true` so the HTTP read timeout resets between chunks.
 - Proposed experiment: enable streaming for the `ollama-cloud` provider (`streaming=True`, drop `disable_streaming=True`) and re-run heavy benchmark questions. Fallback: raise per-attempt read timeout or use a streaming-aware HTTP client.
 
+### 2026-07-04 — streaming liveness watchdog for Ollama Cloud stalls
+
+- Follow-up to the 2026-07-02 streaming hypothesis.  Streaming *was* enabled, but
+  the 3x benchmark run (`bench3x.log`, runs starting 19:05, 20:06, 20:50) and the
+  per-LLM-call metrics (`benchmarks/metrics.jsonl`) showed the deeper problem:
+  intermittent `kimi-k2.7-code:cloud` stalls emit **zero tokens for ~900s** before
+  the per-attempt wall-clock cap kills the call.  Successful calls for the same
+  nodes (`test_designer` p90=96s max=458s; `coder` p90=124s max=561s) stream
+  continuously, so the ~900s timeouts are mid-stream hangs, not slow generations.
+- Worst case observed: `evaluator` run 060105 burned 3 consecutive 900s
+  `test_designer` timeouts (2700s) before the 4th attempt succeeded in 59s.
+  The retry stack (`_invoke_with_retry` 3 attempts × `_handle_llm_unavailable`
+  `INFRA_MAX_RETRIES=5`) multiplied one bad call into ~30+ min of dead time.
+- Fix: added a **streaming liveness watchdog** in `_invoke_with_retry`
+  (`src/nodes.py`).  The worker thread consumes `llm.stream(messages)` chunk-
+  by-chunk into a `queue.Queue`; the main thread pops with a per-chunk idle
+  timeout (`stream_idle_seconds`, default 120s, tunable via `llm_config.yaml`
+  `resilience.stream_idle_seconds` or per-node `stream_idle_seconds`).  A hung
+  stream now aborts in ~120s instead of ~900s; a slow-but-progressing stream
+  still runs up to the total `timeout_seconds` wall-clock budget.  Non-streaming
+  providers use `llm.invoke()` and are bounded by the total wall-clock only.
+- Added `resilience` block to `llm_config.yaml` with `stream_idle_seconds: 120`
+  made explicit (previously only code defaults).
+- Verified with an isolated mock-LLM test: ok-stream completes; hang-at-start
+  and hang-mid both abort at the idle timeout (3 attempts → ~13s with backoff
+  instead of ~2700s); provider errors surface as `error` not `wallclock_timeout`.
+- Did **not** change the malformed-file `FINISH` behaviour in `test_designer` /
+  `skeleton_maker` (separate reliability issue causing the run-2 `calculator`
+  and `largest_prime_digit_sum` failures — see open issues).  Left for a
+  follow-up commit to keep this change focused and revertable.
+
 ### 2026-07-01 — self-loop conditional edge fix
 
 - Fixed `KeyError('test_architect')` crash that killed tasks during infra retry.
