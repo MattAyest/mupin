@@ -12,6 +12,8 @@ services:
       - ./.workspaces:/app/.workspaces
       # Mount config read-only so per-node model choices can change without a rebuild
       - ./llm_config.yaml:/app/llm_config.yaml:ro
+      # Mount profiles read-only so prompt/tooling changes can be tweaked without a rebuild
+      - ./profiles:/app/profiles:ro
     env_file:
       - .env
     environment:

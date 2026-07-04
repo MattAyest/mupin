@@ -36,6 +36,7 @@ running_tasks: Dict[str, "asyncio.Task"] = {}
 
 class TaskRequest(BaseModel):
     prompt: str
+    language: str | None = "python"
 
 
 class TaskStatusResponse(BaseModel):
@@ -94,10 +95,11 @@ async def _drive_graph(task_id: str, initial_state: Dict[str, Any]) -> Dict[str,
     return final_manifest
 
 
-async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str, deadline: float | None = None):
+async def run_swarm_task(task_id: str, prompt: str, workspace_dir: str, profile_name: str, deadline: float | None = None):
     initial_state = {
         "user_prompt": prompt,
         "workspace_dir": workspace_dir,
+        "profile_name": profile_name,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "file_manifest": {},
         "sandbox_errors": "",
@@ -201,7 +203,7 @@ async def generate_code(request: TaskRequest):
     }
 
     running_tasks[task_id] = asyncio.create_task(
-        run_swarm_task(task_id, request.prompt, workspace_dir, deadline=SERVER_TASK_DEADLINE)
+        run_swarm_task(task_id, request.prompt, workspace_dir, profile_name=request.language or "python", deadline=SERVER_TASK_DEADLINE)
     )
 
     return tasks_db[task_id]

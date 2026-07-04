@@ -17,6 +17,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import AgenticState
+from .profile import Profile, get_profile
 
 
 # =============================================================================
@@ -97,17 +98,8 @@ SUPPORTED_PROVIDERS = (
     "openai-compatible",
 )
 
-# Kept as a list (not a tuple) so later code can concatenate it with a list of
-# extra requirements without a TypeError on tuple+list.
-SANDBOX_DEPS = [
-    "pytest",
-    "hypothesis",
-    "ruff",
-    "mypy",
-]
-# Base tools are invoked inside the test container as `python -m <tool>` using
-# PYTHONPATH=/workspace/.deps, because `pip install --target` does not put
-# console scripts on PATH.
+# Base Python tooling is now defined in profiles/python.yaml under
+# sandbox.default_deps.  Each language profile owns its own test/lint/type deps.
 
 # Loop / ceiling constants
 MAX_SANDBOX_LOOPS = 5
@@ -117,6 +109,11 @@ MAX_CONTRACT_LOOPS = 2
 # Server-side hard wall-clock deadline per task. A backstop that auto-cancels a
 # task even if the client died without cancelling it.
 SERVER_TASK_DEADLINE = CONFIG.get("server", {}).get("task_deadline_seconds", 3600)
+
+
+def _profile_from_state(state: AgenticState) -> Profile:
+    """Return the active language profile for this task."""
+    return get_profile(state.get("profile_name"))
 
 
 # =============================================================================
@@ -591,7 +588,7 @@ def resolve_host_path(container_path: str) -> str:
     return abs_path
 
 
-def setup_workspace(workspace: str) -> None:
+def setup_workspace(workspace: str, profile: Profile) -> None:
     """Write the deterministic sandbox scaffolding for a task.
 
     These files are written once per workspace and then left alone so that
@@ -600,32 +597,21 @@ def setup_workspace(workspace: str) -> None:
 
     The workspace is chowned to the host user identity so that sandbox
     containers running as that user can write into it without running as root.
+
+    Scaffolding is loaded from the active profile so each language gets the
+    correct test runner configuration.
     """
     os.makedirs(workspace, exist_ok=True)
 
-    conftest = textwrap.dedent(
-        """\
-        from hypothesis import HealthCheck, settings
+    for filename, content in profile.setup_files().items():
+        if not os.path.exists(os.path.join(workspace, filename)):
+            _write_workspace_file(workspace, filename, content)
 
-        settings.register_profile(
-            "sandbox",
-            max_examples=50,
-            deadline=5000,
-            suppress_health_check=[HealthCheck.too_slow],
-        )
-        settings.load_profile("sandbox")
-        """
-    )
-    if not os.path.exists(os.path.join(workspace, "conftest.py")):
-        _write_workspace_file(workspace, "conftest.py", conftest)
-
-    pytest_ini = "[pytest]\ntestpaths = tests\npythonpath = .\n"
-    if not os.path.exists(os.path.join(workspace, "pytest.ini")):
-        _write_workspace_file(workspace, "pytest.ini", pytest_ini)
-
-    requirements = "\n".join(SANDBOX_DEPS) + "\n"
-    if not os.path.exists(os.path.join(workspace, "requirements.txt")):
-        _write_workspace_file(workspace, "requirements.txt", requirements)
+    deps_file = profile.sandbox_value("deps_file", "requirements.txt")
+    default_deps = profile.sandbox_value("default_deps", [])
+    requirements = "\n".join(default_deps) + "\n" if default_deps else ""
+    if requirements and not os.path.exists(os.path.join(workspace, deps_file)):
+        _write_workspace_file(workspace, deps_file, requirements)
 
     # Ensure the host user (not root) owns the workspace and scaffolding files
     # so the sandbox can run unprivileged. If we are already that user, chown
@@ -727,117 +713,11 @@ def test_designer(state: AgenticState):
     sandbox_errors = state.get("sandbox_errors", "")
     contract_loop = state.get("contract_loop_count", 0)
 
-    setup_workspace(workspace)
+    profile = _profile_from_state(state)
+    setup_workspace(workspace, profile)
+    test_main_path = profile.file_path("test_main")
 
-    system = textwrap.dedent(
-        """\
-        <role>
-        You are the Test Designer in a strict test-driven code-generation pipeline.
-        Your job is to produce a focused baseline test suite in tests/test_main.py.
-        </role>
-
-        <goal>
-        Write tests that:
-        1. Cover every explicit functional requirement in the user prompt with at least one test.
-        2. Exercise invariants and randomized domains using Hypothesis @given where appropriate.
-        3. Use pytest.raises for raise-rule cases.
-        4. Output only tests/test_main.py and tests/__init__.py.
-        </goal>
-
-        <rules>
-        - Use @settings(max_examples=50) on every @given test.
-        - Constrain Hypothesis strategies at the source; never use assume().
-        - Import the implementation from src.main.
-        - Write assertions directly: assert x == y, not assert (x) == (y).
-        - Use black-box property tests only. Do not monkeypatch, mock, or subclass
-          built-in types or methods to enforce implementation details. These techniques
-          are brittle and break on modern runtimes.
-        - Do not use pytest fixtures inside @given tests; the property runner does not
-          reset function-scoped fixtures between examples.
-        - For expression evaluators, calculators, parsers, or similar tasks, generate raw
-          expression strings and compute expected values using the target language's
-          standard evaluator in a safe scope. Do not hand-write AST renderers.
-        - Do not output src/main.py, requirements.txt, or any skeleton.
-        </rules>
-
-        <examples>
-        <example>
-        User prompt: Write a Python function fibonacci(n: int) -> list[int] that returns the first n Fibonacci numbers.
-        Output:
-        <file name="tests/test_main.py">
-        import pytest
-        from hypothesis import given, settings, strategies as st
-        from src.main import fibonacci
-
-        @given(n=st.integers(min_value=2, max_value=100))
-        @settings(max_examples=50)
-        def test_fibonacci_recurrence(n):
-            result = fibonacci(n)
-            assert len(result) == n
-            assert result[0] == 0
-            assert result[1] == 1
-            for i in range(2, n):
-                assert result[i] == result[i - 1] + result[i - 2]
-
-        @given(n=st.integers(min_value=-100, max_value=-1))
-        @settings(max_examples=50)
-        def test_fibonacci_negative_raises(n):
-            with pytest.raises(ValueError):
-                fibonacci(n)
-        </file>
-        <file name="tests/__init__.py"></file>
-        </example>
-
-        <example>
-        User prompt: Write a Python function merge_sorted(a: list[int], b: list[int]) -> list[int] that merges two already-sorted lists into one sorted list.
-        Output:
-        <file name="tests/test_main.py">
-        from hypothesis import given, settings, strategies as st
-        from src.main import merge_sorted
-
-        @st.composite
-        def sorted_int_list(draw):
-            return sorted(draw(st.lists(st.integers())))
-
-        @given(a=sorted_int_list(), b=sorted_int_list())
-        @settings(max_examples=50)
-        def test_merge_sorted_is_sorted_and_complete(a, b):
-            result = merge_sorted(a, b)
-            assert len(result) == len(a) + len(b)
-            assert result == sorted(result)
-            assert sorted(result) == sorted(a + b)
-
-        @given(a=sorted_int_list(), b=sorted_int_list())
-        @settings(max_examples=50)
-        def test_merge_sorted_preserves_inputs(a, b):
-            a_before = list(a)
-            b_before = list(b)
-            merge_sorted(a, b)
-            assert a == a_before
-            assert b == b_before
-        </file>
-        <file name="tests/__init__.py"></file>
-        </example>
-        </examples>
-
-        <output_format>
-        Wrap each file exactly:
-          <file name="tests/test_main.py">...</file>
-          <file name="tests/__init__.py">...</file>
-        Do not output markdown fences, commentary, or any other files.
-        </output_format>
-
-        <quality_check>
-        Before finishing, verify that:
-        - Every explicit requirement in the user prompt has a corresponding test.
-        - No test monkeypatches, mocks, or subclasses built-in types or methods.
-        - No test uses pytest fixtures inside @given.
-        - All assertions are written without unnecessary parentheses.
-        - Hypothesis strategies use only current API arguments (do not mix deprecated
-          whitelist/blacklist with newer include/exclude).
-        </quality_check>
-        """
-    )
+    system = profile.prompt("test_designer_system")
 
     user_prompt = f"User prompt:\n{prompt}"
     user_prompt += (
@@ -849,10 +729,10 @@ def test_designer(state: AgenticState):
         "operator precedence; let the language parser be the source of truth."
     )
 
-    prior_tests = manifest.get("tests/test_main.py", "")
+    prior_tests = manifest.get(test_main_path, "")
     if prior_tests:
         user_prompt += (
-            f"\n\nYour previous tests/test_main.py (contract loop {contract_loop}):\n"
+            f"\n\nYour previous {test_main_path} (contract loop {contract_loop}):\n"
             f"```python\n{prior_tests}\n```"
         )
     if contract_critique:
@@ -885,7 +765,9 @@ def test_designer(state: AgenticState):
     files = _parse_file_tags(content)
 
     # Validate that the required test files exist.
-    required = {"tests/test_main.py", "tests/__init__.py"}
+    test_main_path = profile.file_path("test_main")
+    test_init_path = profile.file_path("test_init")
+    required = {test_main_path, test_init_path}
     missing = required - set(files.keys())
     if missing:
         _diag(
@@ -936,85 +818,25 @@ def skeleton_maker(state: AgenticState):
     manifest = state.get("file_manifest", {})
     contract_loop = state.get("contract_loop_count", 0)
 
-    setup_workspace(workspace)
+    profile = _profile_from_state(state)
+    setup_workspace(workspace, profile)
 
-    test_code = manifest.get("tests/test_main.py", "")
+    test_main_path = profile.file_path("test_main")
+    test_code = manifest.get(test_main_path, "")
     if not test_code:
         return {
-            "sandbox_errors": "Skeleton Maker Error: missing tests/test_main.py",
+            "sandbox_errors": f"Skeleton Maker Error: missing {test_main_path}",
             "next_node": "FINISH",
             "thoughts": _think(
                 workspace,
                 "skeleton_maker",
-                "ERROR: missing tests/test_main.py before skeleton creation",
+                f"ERROR: missing {test_main_path} before skeleton creation",
             ),
         }
 
-    system = textwrap.dedent(
-        """\
-        <role>
-        You are the Skeleton Maker in a strict test-driven code-generation pipeline.
-        </role>
+    system = profile.prompt("skeleton_maker_system")
 
-        <goal>
-        Given the user prompt and a generated tests/test_main.py file, produce a minimal
-        src/main.py skeleton that the tests can import, and report whether the tests are
-        compatible with the prompt.
-        </goal>
-
-        <inputs>
-        - The user's natural-language prompt.
-        - The generated tests/test_main.py file.
-        </inputs>
-
-        <rules>
-        - Match every function/class name and signature called by the tests.
-        - Use type hints exactly as implied by the test assertions.
-        - Function and method bodies must be only pass or raise NotImplementedError.
-        - Do not write any algorithmic logic, helpers, or non-stdlib imports in the skeleton.
-        - Output an empty src/__init__.py.
-        - If tests import from a module other than src.main, mark the contract incompatible.
-        - If tests expect behavior not supported by the prompt, mark the contract
-          incompatible and explain.
-        - If the prompt is ambiguous, pick a consistent interpretation, build the skeleton
-          to match it, and note the ambiguity in the critique.
-        </rules>
-
-        <example>
-        tests/test_main.py contains:
-          from src.main import Stack
-          def test_new_stack_is_empty():
-              s = Stack()
-              assert s.is_empty()
-        Output:
-        <file name="src/main.py">
-        class Stack:
-            def __init__(self) -> None: ...
-            def is_empty(self) -> bool: ...
-        </file>
-        <file name="src/__init__.py"></file>
-        <contract_verdict>{"compatible": true, "critique": []}</contract_verdict>
-        </example>
-
-        <output_format>
-        Wrap each file and verdict in exactly:
-          <file name="src/main.py">...</file>
-          <file name="src/__init__.py">...</file>
-          <contract_verdict>{"compatible": true|false, "critique": ["..."]}</contract_verdict>
-        Do not output markdown fences, commentary, or any other files.
-        </output_format>
-
-        <quality_check>
-        Before finishing, verify that:
-        - Every function/class used by the tests has a matching skeleton entry.
-        - Type hints are consistent with the tests.
-        - Bodies contain only pass or raise NotImplementedError.
-        - The contract_verdict JSON is valid.
-        </quality_check>
-        """
-    )
-
-    user_prompt = f"User prompt:\n{prompt}\n\nTests/test_main.py:\n{test_code}"
+    user_prompt = f"User prompt:\n{prompt}\n\nTests/{test_main_path}:\n{test_code}"
 
     try:
         content, llm_usage = _invoke_with_retry(
@@ -1028,7 +850,9 @@ def skeleton_maker(state: AgenticState):
     files = _parse_file_tags(content)
 
     # Validate that the required skeleton files exist.
-    required = {"src/main.py", "src/__init__.py"}
+    source_main_path = profile.file_path("source_main")
+    source_init_path = profile.file_path("source_init")
+    required = {source_main_path, source_init_path}
     missing = required - set(files.keys())
     if missing:
         _diag(
@@ -1143,12 +967,17 @@ def coder(state: AgenticState):
     manifest = state.get("file_manifest", {})
     sandbox_errors = state.get("sandbox_errors", "")
 
-    test_code = manifest.get("tests/test_main.py", "")
-    stub_code = manifest.get("src/main.py", "")
+    profile = _profile_from_state(state)
+    test_main_path = profile.file_path("test_main")
+    source_main_path = profile.file_path("source_main")
+    deps_file = profile.sandbox_value("deps_file", "requirements.txt")
+
+    test_code = manifest.get(test_main_path, "")
+    stub_code = manifest.get(source_main_path, "")
 
     if not test_code or not stub_code:
         return {
-            "sandbox_errors": "Coder Error: missing tests/test_main.py or src/main.py skeleton",
+            "sandbox_errors": f"Coder Error: missing {test_main_path} or {source_main_path} skeleton",
             "next_node": "FINISH",
             "thoughts": _think(
                 workspace,
@@ -1157,75 +986,9 @@ def coder(state: AgenticState):
             ),
         }
 
-    system = textwrap.dedent(
-        """\
-        <role>
-        You are the Coder in a strict test-driven pipeline.
-        </role>
+    system = profile.prompt("coder_system")
 
-        <goal>
-        Replace every pass body in the provided src/main.py skeleton with correct, clean
-        algorithmic logic so that the frozen tests/test_main.py passes.
-        </goal>
-
-        <inputs>
-        - The original user prompt.
-        - The frozen tests/test_main.py file (you may NOT modify it).
-        - The src/main.py skeleton with signatures and type hints (you may NOT change
-          signatures, class names, or function names).
-        - If provided, the last sandbox error output (fix the implementation, not the tests).
-        </inputs>
-
-        <rules>
-        - Only modify function/class bodies. Do not change signatures, imports, or class structure.
-        - Do not output or modify tests/test_main.py or any test file.
-        - Do not hardcode outputs or special-case inputs to make tests pass.
-        - Prefer clean, readable code over clever one-liners.
-        - If third-party dependencies are needed, include them as <file name="requirements.txt">;
-          otherwise omit this file.
-        </rules>
-
-        <example>
-        Frozen tests/test_main.py:
-          from src.main import fibonacci
-          def test_fibonacci_basic():
-              assert fibonacci(5) == [0, 1, 1, 2, 3]
-        Skeleton src/main.py:
-          def fibonacci(n: int) -> list[int]:
-              pass
-        Output:
-        <file name="src/main.py">
-        def fibonacci(n: int) -> list[int]:
-            if n < 0:
-                raise ValueError("n must be non-negative")
-            if n == 0:
-                return []
-            if n == 1:
-                return [0]
-            sequence = [0, 1]
-            while len(sequence) < n:
-                sequence.append(sequence[-1] + sequence[-2])
-            return sequence
-        </file>
-        </example>
-
-        <output_format>
-        Wrap each file in exactly:
-          <file name="src/main.py">...</file>
-          <file name="requirements.txt">...</file>  (only if third-party deps are needed)
-        Do not output markdown fences, commentary, or any test files.
-        </output_format>
-
-        <quality_check>
-        Before finishing, verify that:
-        - All pass bodies have been replaced with real logic.
-        - No signature, import, or class structure was changed.
-        - The implementation is general and does not hardcode test inputs.
-        </quality_check>
-        """
-    )
-
-    user_prompt = f"User prompt:\n{prompt}\n\nFrozen tests/test_main.py:\n{test_code}\n\nSkeleton src/main.py:\n{stub_code}"
+    user_prompt = f"User prompt:\n{prompt}\n\nFrozen {test_main_path}:\n{test_code}\n\nSkeleton {source_main_path}:\n{stub_code}"
     if sandbox_errors:
         user_prompt += (
             f"\n\nThe last sandbox run failed with these errors. Fix the implementation, "
@@ -1243,43 +1006,45 @@ def coder(state: AgenticState):
 
     new_files = _parse_file_tags(content)
 
-    if "src/main.py" not in new_files:
+    if source_main_path not in new_files:
         _diag(
             workspace,
             "coder",
-            f"No src/main.py in coder output\nRaw response (first 2000 chars):\n{content[:2000]}",
+            f"No {source_main_path} in coder output\nRaw response (first 2000 chars):\n{content[:2000]}",
         )
         return {
-            "sandbox_errors": "Coder Error: failed to produce src/main.py",
+            "sandbox_errors": f"Coder Error: failed to produce {source_main_path}",
             "llm_usage": llm_usage,
             "next_node": "FINISH",
             "thoughts": _think(
                 workspace,
                 "coder",
-                "ERROR: no src/main.py produced",
+                f"ERROR: no {source_main_path} produced",
             ),
         }
 
-    # Preserve frozen test files and init files; only overwrite src/main.py and requirements.txt.
+    # Preserve frozen test files and init files; only overwrite the source main file
+    # and dependency file.
+    source_init_path = profile.file_path("source_init")
     preserved = {
         k: v
         for k, v in manifest.items()
-        if k.startswith("tests/") or k in {"src/__init__.py"}
+        if k.startswith(profile.file_path("test_dir") + "/") or k in {source_init_path}
     }
-    final_manifest = {**preserved, "src/main.py": new_files["src/main.py"]}
+    final_manifest = {**preserved, source_main_path: new_files[source_main_path]}
 
     # Merge any third-party requirements from the coder on top of the base sandbox deps
-    # so pytest/hypothesis/ruff/mypy are never lost on a retry.
-    base_reqs = set(SANDBOX_DEPS)
-    if "requirements.txt" in new_files:
+    # so profile tooling is never lost on a retry.
+    base_reqs = set(profile.sandbox_value("default_deps", []))
+    if deps_file in new_files:
         extra_lines = [
             line.strip()
-            for line in new_files["requirements.txt"].splitlines()
+            for line in new_files[deps_file].splitlines()
             if line.strip() and line.strip() not in base_reqs
         ]
-        final_manifest["requirements.txt"] = "\n".join(SANDBOX_DEPS + extra_lines) + "\n"
-    elif "requirements.txt" in manifest:
-        final_manifest["requirements.txt"] = manifest["requirements.txt"]
+        final_manifest[deps_file] = "\n".join(sorted(base_reqs | set(extra_lines))) + "\n"
+    elif deps_file in manifest:
+        final_manifest[deps_file] = manifest[deps_file]
 
     _diag(
         workspace,
@@ -1297,7 +1062,7 @@ def coder(state: AgenticState):
         "thoughts": _think(
             workspace,
             "coder",
-            f"Implemented src/main.py ({len(new_files['src/main.py'])} chars)",
+            f"Implemented {source_main_path} ({len(new_files[source_main_path])} chars)",
         ),
     }
 
@@ -1329,12 +1094,13 @@ def sandbox_arbiter(state: AgenticState):
 
     write_manifest_to_disk(workspace, manifest)
 
-    docker_cfg = CONFIG.get("docker", {})
-    IMAGE = docker_cfg.get("image", "python:3.11-slim")
-    memory_limit = docker_cfg.get("memory_limit", "512m")
-    timeout_install = docker_cfg.get("timeout_install", 90)
-    timeout_test = docker_cfg.get("timeout_test", 120)
-    timeout_total = timeout_install + timeout_test + 60  # headroom for ruff/mypy/pytest
+    profile = _profile_from_state(state)
+    IMAGE = profile.sandbox_value("image", "python:3.11-slim")
+    memory_limit = profile.sandbox_value("memory", "512m")
+    timeout_install = profile.sandbox_value("timeout_install", 90)
+    timeout_test = profile.sandbox_value("timeout_test", 120)
+    timeout_total = timeout_install + timeout_test + 60  # headroom for tools + tests
+    cpus = profile.sandbox_value("cpus", "1.0")
 
     host_uid, host_gid = _host_identity()
 
@@ -1345,7 +1111,7 @@ def sandbox_arbiter(state: AgenticState):
         f"--user={host_uid}:{host_gid}",
         f"--memory={memory_limit}",
         f"--memory-swap={memory_limit}",
-        "--cpus=1.0",
+        f"--cpus={cpus}",
         "--pids-limit=64",
         "--ulimit=nofile=1024:1024",
         "--cap-drop=ALL",
@@ -1377,10 +1143,11 @@ def sandbox_arbiter(state: AgenticState):
         "-e", "PIP_ROOT_USER_ACTION=ignore",
         "-e", "TMPDIR=/workspace/.tmp",
     ]
-    install_script = (
+    deps_file = profile.sandbox_value("deps_file", "requirements.txt")
+    install_script = profile.resolve(profile.sandbox_value("install_command", (
         "mkdir -p /workspace/.tmp && "
-        "pip install -q --target /workspace/.deps -r /workspace/requirements.txt"
-    )
+        f"pip install -q --target /workspace/.deps -r /workspace/{deps_file}"
+    )))
     install_cmd = (
         ["docker", "run", "--rm"]
         + hardening_flags
@@ -1391,63 +1158,12 @@ def sandbox_arbiter(state: AgenticState):
 
     # Verification container: read-only root filesystem, no network, tmpfs for
     # /tmp and /var/tmp. Only /workspace (the bind mount) is writable.
-    # All Python tools are invoked as `python -m` because pip's `--target` flag
-    # installs console scripts under .deps/bin, which is not on PATH.
     verify_env = [
         "-e", "PYTHONPATH=/workspace/.deps",
         "-e", "RUFF_CACHE_DIR=/tmp/ruff_cache",
         "-e", "MYPY_CACHE_DIR=/tmp/mypy_cache",
     ]
-    arbiter_script = textwrap.dedent(
-        """\
-        set -euo pipefail
-        export PYTHONPATH=/workspace/.deps
-        export RUFF_CACHE_DIR=/tmp/ruff_cache
-        export MYPY_CACHE_DIR=/tmp/mypy_cache
-
-        echo "__RUFF_FORMAT_SRC_START__"
-        python -m ruff format src/main.py || { echo "__RUFF_FORMAT_SRC_FAILED__"; exit 1; }
-        echo "__RUFF_FORMAT_SRC_OK__"
-
-        echo "__RUFF_FORMAT_TESTS_START__"
-        python -m ruff format tests/test_main.py || { echo "__RUFF_FORMAT_TESTS_FAILED__"; exit 1; }
-        echo "__RUFF_FORMAT_TESTS_OK__"
-
-        echo "__RUFF_CHECK_SRC_START__"
-        python -m ruff check --fix src/main.py || { echo "__RUFF_CHECK_SRC_FAILED__"; exit 1; }
-        echo "__RUFF_CHECK_SRC_OK__"
-
-        echo "__RUFF_CHECK_TESTS_START__"
-        python -m ruff check --fix tests/test_main.py || { echo "__RUFF_CHECK_TESTS_FAILED__"; exit 1; }
-        echo "__RUFF_CHECK_TESTS_OK__"
-
-        echo "__TAUTOLOGY_START__"
-        python -c "
-import ast, sys
-tree = ast.parse(open('tests/test_main.py').read())
-for n in ast.walk(tree):
-    if isinstance(n, ast.Compare) and len(n.comparators) == 1:
-        if ast.dump(n.left) == ast.dump(n.comparators[0]):
-            print('__TAUTOLOGY_DETECTED__')
-            sys.exit(1)
-" || { echo "__TAUTOLOGY_FAILED__"; exit 1; }
-        echo "__TAUTOLOGY_OK__"
-
-        echo "__MYPY_START__"
-        python -m mypy --ignore-missing-imports src/main.py || { echo "__MYPY_SRC_FAILED__"; exit 1; }
-        echo "__MYPY_OK__"
-
-        echo "__PYTEST_START__"
-        python -m pytest tests/test_main.py \
-            -p no:cacheprovider \
-            --hypothesis-seed=42 \
-            --hypothesis-profile=sandbox \
-            || { echo "__PYTEST_FAILED__"; exit 1; }
-        echo "__PYTEST_OK__"
-
-        echo "__SANDBOX_PASS__"
-        """
-    )
+    arbiter_script = profile.resolve(profile.sandbox_value("verify_command"))
     arbiter_cmd = (
         ["docker", "run", "--rm", "--network", "none", "--read-only"]
         + hardening_flags
@@ -1493,13 +1209,16 @@ for n in ast.walk(tree):
         stderr = arbiter_res.stderr
         _diag(ws, "sandbox_arbiter", f"Sandbox output:\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
 
-        # Re-read files in case ruff mutated them.
-        new_main = read_file_from_disk(workspace, "src/main.py")
-        new_test = read_file_from_disk(workspace, "tests/test_main.py")
-        if new_main:
-            manifest["src/main.py"] = new_main
-        if new_test:
-            manifest["tests/test_main.py"] = new_test
+        # Re-read files in case the profile tooling mutated them.
+        profile = _profile_from_state(state)
+        source_main_path = profile.file_path("source_main")
+        test_main_path = profile.file_path("test_main")
+        new_main = read_file_from_disk(workspace, source_main_path)
+        new_test = read_file_from_disk(workspace, test_main_path)
+        if new_main.strip():
+            manifest[source_main_path] = new_main
+        if new_test.strip():
+            manifest[test_main_path] = new_test
 
         diagnostics = _parse_sandbox_output(stdout, stderr, loop)
 
@@ -1726,62 +1445,16 @@ def prompt_compliance_checker(state: AgenticState):
     compliance_loop = state.get("compliance_loop_count", 0)
     prior_critique = state.get("compliance_critique", [])
 
-    src_code = manifest.get("src/main.py", "")
-    test_code = manifest.get("tests/test_main.py", "")
+    profile = _profile_from_state(state)
+    source_main_path = profile.file_path("source_main")
+    test_main_path = profile.file_path("test_main")
 
-    system = textwrap.dedent(
-        """\
-        <role>
-        You are the Prompt Compliance Checker in a test-driven code-generation pipeline.
-        </role>
+    src_code = manifest.get(source_main_path, "")
+    test_code = manifest.get(test_main_path, "")
 
-        <goal>
-        Evaluate whether the passing src/main.py implementation structurally satisfies the
-        user prompt's explicit functional requirements.
-        </goal>
+    system = profile.prompt("compliance_checker_system")
 
-        <inputs>
-        - The original natural-language user prompt.
-        - The passing src/main.py implementation.
-        - The passing tests/test_main.py suite.
-        </inputs>
-
-        <rules>
-        - Judge completeness only against the prompt's explicit functional requirements.
-        - Style, naming conventions, and performance optimization are out of scope.
-        - If the prompt names a standard algorithmic construct (e.g. graph, parser, heap,
-          queue, evaluator), the implementation must be structurally sound for that construct:
-          correct semantics, idiomatic data structures, and no obvious anti-patterns that
-          would fail under normal adversarial use.
-        - Reject only clear functional or structural defects, not cosmetic preferences.
-        - Do not require features the prompt does not mention.
-        </rules>
-
-        <example>
-        User prompt: Implement a Stack class with push, pop, peek, is_empty, and size methods.
-        src/main.py implements Stack with a list and correct LIFO semantics.
-        Output: {"compliance_status": "PASS", "missing_features": []}
-        </example>
-
-        <output_format>
-        Output exactly a JSON object and nothing else:
-          {"compliance_status": "PASS" | "FAIL", "missing_features": ["..."]}
-        Use PASS only if the implementation demonstrably covers every functional requirement.
-        Use FAIL if a required behavior or feature is missing or incomplete; list missing
-        features concisely, one string per item.
-        </output_format>
-
-        <quality_check>
-        Before finishing, verify that:
-        - Each explicit functional requirement is either covered by the implementation or
-          listed in missing_features.
-        - No unstated requirement is being enforced.
-        - The output is valid JSON with exactly the two required keys.
-        </quality_check>
-        """
-    )
-
-    user_prompt = f"User prompt:\n{prompt}\n\nsrc/main.py:\n{src_code}\n\ntests/test_main.py:\n{test_code}"
+    user_prompt = f"User prompt:\n{prompt}\n\n{source_main_path}:\n{src_code}\n\n{test_main_path}:\n{test_code}"
     if prior_critique:
         user_prompt += (
             "\n\nPrior compliance critiques:\n"

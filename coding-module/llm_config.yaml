@@ -52,12 +52,6 @@ loop_limits:
     max_sandbox_loops: 5
     max_compliance_loops: 2
 
-docker:
-    image: "python:3.11-slim"
-    timeout_install: 90
-    timeout_test: 120
-    memory_limit: "512m"
-
 server:
     # Hard wall-clock backstop per task (seconds). The orchestrator auto-cancels
     # a task that exceeds this, even if the client never called /cancel.

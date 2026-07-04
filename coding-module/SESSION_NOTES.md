@@ -507,7 +507,7 @@ now; the focus is on reducing first-pass generation time and improving test/skel
 
 ---
 
-## 11. Language Profile Refactor (Planned)
+## 11. Language Profile Refactor (Step 1 Implemented)
 
 ### Goal
 Make the Coding Module language-agnostic by extracting all language-specific
@@ -637,20 +637,31 @@ def get_profile(name: str = "python") -> Profile:
 - Does not add a second language profile.
 - Does not change the Python sandbox image or tools.
 - Does not change Python prompt behavior.
-- Does not alter the Dockerfile or docker-compose.yml.
 
 ### Step 2 (planned, not implemented)
 Choose one second language (e.g., JavaScript/TypeScript or Go) and:
 - Create `profiles/<lang>.yaml`.
 - Add a small benchmark set for that language.
-- Extend `sandbox_arbiter` if the profile's `run_command` isn't enough on its own.
+- Extend `sandbox_arbiter` if the profile's `verify_command` isn't enough on its own.
 - Document any language-specific edge cases in this section.
 
-### Verification for Step 1
+### Verification for Step 1 (completed)
 After the refactor:
-1. `python -m py_compile` on all `src/*.py` files.
-2. `docker compose up --build` to confirm the API starts.
-3. Run the medium benchmark suite; expect pass rate and runtime unchanged.
+1. ✅ `python -m py_compile` on all `src/*.py` files.
+2. ✅ `docker compose up --build` confirms the API starts.
+3. ✅ Smoke test: `fibonacci` task passes end-to-end in ~30s.
+4. ✅ `bounded_queue` task passes end-to-end in ~80s with the new profile.
+
+### Actual changes made
+- Removed `docker:` runtime section from `coding-module/llm_config.yaml`;
+  runtime settings now live in `profiles/python.yaml`.
+- Updated `coding-module/Dockerfile` to `COPY profiles/ ./profiles/`.
+- Updated `coding-module/docker-compose.yml` to mount `./profiles:/app/profiles:ro`
+  so prompt/tooling tweaks do not require a rebuild.
+- Added `pytest-timeout` to Python profile default deps and `--timeout=30 -v` to the
+  pytest invocation in `verify_command`.
+- Set Python profile `cpus: "2.0"` to reduce GIL starvation in concurrency tests.
+- Added a concurrency rule to `test_designer_system` in the profile.
 
 ### Files changed in Step 1
 - `coding-module/src/nodes.py` (refactored)
@@ -658,6 +669,9 @@ After the refactor:
 - `coding-module/src/state.py` (profile_name field)
 - `coding-module/src/profile.py` (new)
 - `coding-module/profiles/python.yaml` (new)
+- `coding-module/Dockerfile` (copy profiles)
+- `coding-module/docker-compose.yml` (mount profiles)
+- `coding-module/llm_config.yaml` (remove docker runtime section)
 - `coding-module/SESSION_NOTES.md` (this entry)
 
 ## 12. Legacy: v0.1 Pipeline

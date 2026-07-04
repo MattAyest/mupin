@@ -1,0 +1,411 @@
+# =============================================================================
+# Python 3.11 profile for the Coding Module v0.2
+# =============================================================================
+# This profile owns every Python-specific convention so the core pipeline
+# can stay language-agnostic. Future languages get their own profile YAML.
+#
+# Placeholders used in prompts and commands:
+#   __SOURCE_MAIN__       -> src/main.py
+#   __TEST_MAIN__         -> tests/test_main.py
+#   __SOURCE_INIT__       -> src/__init__.py
+#   __TEST_INIT__         -> tests/__init__.py
+#   __IMPORT_PATH__       -> src.main
+#   __DEPS_FILE__         -> requirements.txt
+# =============================================================================
+
+name: python
+display_name: Python 3.11
+default: true
+
+sandbox:
+  image: python:3.11-slim
+  cpus: "2.0"
+  memory: "512m"
+  timeout_install: 90
+  timeout_test: 120
+  deps_file: requirements.txt
+  default_deps:
+    - pytest
+    - hypothesis
+    - ruff
+    - mypy
+    - pytest-timeout
+  install_command: |
+    mkdir -p /workspace/.tmp && pip install -q --target /workspace/.deps -r /workspace/requirements.txt
+  verify_command: |
+    set -euo pipefail
+    export PYTHONPATH=/workspace/.deps
+    export RUFF_CACHE_DIR=/tmp/ruff_cache
+    export MYPY_CACHE_DIR=/tmp/mypy_cache
+
+    echo "__RUFF_FORMAT_SRC_START__"
+    python -m ruff format __SOURCE_MAIN__ || { echo "__RUFF_FORMAT_SRC_FAILED__"; exit 1; }
+    echo "__RUFF_FORMAT_SRC_OK__"
+
+    echo "__RUFF_FORMAT_TESTS_START__"
+    python -m ruff format __TEST_MAIN__ || { echo "__RUFF_FORMAT_TESTS_FAILED__"; exit 1; }
+    echo "__RUFF_FORMAT_TESTS_OK__"
+
+    echo "__RUFF_CHECK_SRC_START__"
+    python -m ruff check --fix __SOURCE_MAIN__ || { echo "__RUFF_CHECK_SRC_FAILED__"; exit 1; }
+    echo "__RUFF_CHECK_SRC_OK__"
+
+    echo "__RUFF_CHECK_TESTS_START__"
+    python -m ruff check --fix __TEST_MAIN__ || { echo "__RUFF_CHECK_TESTS_FAILED__"; exit 1; }
+    echo "__RUFF_CHECK_TESTS_OK__"
+
+    echo "__TAUTOLOGY_START__"
+    python -c "import ast,sys; tree=ast.parse(open('__TEST_MAIN__').read()); [sys.exit(1) for n in ast.walk(tree) if isinstance(n,ast.Compare) and len(n.comparators)==1 and ast.dump(n.left)==ast.dump(n.comparators[0])]" || { echo "__TAUTOLOGY_FAILED__"; exit 1; }
+    echo "__TAUTOLOGY_OK__"
+
+    echo "__MYPY_START__"
+    python -m mypy --ignore-missing-imports __SOURCE_MAIN__ || { echo "__MYPY_SRC_FAILED__"; exit 1; }
+    echo "__MYPY_OK__"
+
+    echo "__PYTEST_START__"
+    python -m pytest __TEST_MAIN__ \
+        -p no:cacheprovider \
+        --hypothesis-seed=42 \
+        --hypothesis-profile=sandbox \
+        --timeout=30 \
+        -v \
+        || { echo "__PYTEST_FAILED__"; exit 1; }
+    echo "__PYTEST_OK__"
+
+    echo "__SANDBOX_PASS__"
+
+files:
+  source_dir: src
+  test_dir: tests
+  source_main: src/main.py
+  test_main: tests/test_main.py
+  source_init: src/__init__.py
+  test_init: tests/__init__.py
+  manifest:
+    - src/main.py
+    - src/__init__.py
+    - tests/test_main.py
+    - tests/__init__.py
+    - requirements.txt
+
+workspace:
+  setup_files:
+    conftest.py: |
+      from hypothesis import HealthCheck, settings
+
+      settings.register_profile(
+          "sandbox",
+          max_examples=50,
+          deadline=5000,
+          suppress_health_check=[HealthCheck.too_slow],
+      )
+      settings.load_profile("sandbox")
+    pytest.ini: |
+      [pytest]
+      testpaths = tests
+      pythonpath = .
+
+prompts:
+  import_path: src.main
+  source_file: src/main.py
+  test_file: tests/test_main.py
+  deps_file: requirements.txt
+
+  # ---------------------------------------------------------------------------
+  # NODE: test_designer
+  # ---------------------------------------------------------------------------
+  test_designer_system: |
+    <role>
+    You are the Test Designer in a strict test-driven Python code-generation pipeline.
+    Your job is to produce a focused baseline test suite in __TEST_MAIN__.
+    </role>
+
+    <goal>
+    Write tests that:
+    1. Cover every explicit functional requirement in the user prompt with at least one test.
+    2. Exercise invariants and randomized domains using Hypothesis @given where appropriate.
+    3. Use pytest.raises for raise-rule cases.
+    4. Output only __TEST_MAIN__ and __TEST_INIT__.
+    </goal>
+
+    <rules>
+    - Use @settings(max_examples=50) on every @given test.
+    - Constrain Hypothesis strategies at the source; never use assume().
+    - Import the implementation from __IMPORT_PATH__.
+    - Write assertions directly: assert x == y, not assert (x) == (y).
+    - Use black-box property tests only. Do not monkeypatch, mock, or subclass
+      built-in types or methods to enforce implementation details. These techniques
+      are brittle and break on modern Python runtimes.
+    - Do not use pytest fixtures inside @given tests; the property runner does not
+      reset function-scoped fixtures between examples.
+    - For expression evaluators, calculators, parsers, or similar tasks, generate raw
+      expression strings and compute expected values using Python's eval() with a safe
+      scope. Do not hand-write AST renderers.
+    - Do not output __SOURCE_FILE__, __DEPS_FILE__, or any skeleton.
+    - For concurrency/synchronization tasks, write only deterministic threading tests.
+      Each test must: start the helper thread, perform exactly one wake action from the
+      main thread, then join the helper with timeout <= 1s. Do NOT use threading.Barrier,
+      do NOT wait for a thread to be alive before waking it, and do NOT generate randomized
+      multi-threaded property tests.
+    </rules>
+
+    <examples>
+    <example>
+    User prompt: Write a Python function fibonacci(n: int) -> list[int] that returns the first n Fibonacci numbers.
+    Output:
+    <file name="__TEST_MAIN__">
+    import pytest
+    from hypothesis import given, settings, strategies as st
+    from __IMPORT_PATH__ import fibonacci
+
+    @given(n=st.integers(min_value=2, max_value=100))
+    @settings(max_examples=50)
+    def test_fibonacci_recurrence(n):
+        result = fibonacci(n)
+        assert len(result) == n
+        assert result[0] == 0
+        assert result[1] == 1
+        for i in range(2, n):
+            assert result[i] == result[i - 1] + result[i - 2]
+
+    @given(n=st.integers(min_value=-100, max_value=-1))
+    @settings(max_examples=50)
+    def test_fibonacci_negative_raises(n):
+        with pytest.raises(ValueError):
+            fibonacci(n)
+    </file>
+    <file name="__TEST_INIT__"></file>
+    </example>
+
+    <example>
+    User prompt: Write a Python function merge_sorted(a: list[int], b: list[int]) -> list[int] that merges two already-sorted lists into one sorted list.
+    Output:
+    <file name="__TEST_MAIN__">
+    from hypothesis import given, settings, strategies as st
+    from __IMPORT_PATH__ import merge_sorted
+
+    @st.composite
+    def sorted_int_list(draw):
+        return sorted(draw(st.lists(st.integers())))
+
+    @given(a=sorted_int_list(), b=sorted_int_list())
+    @settings(max_examples=50)
+    def test_merge_sorted_is_sorted_and_complete(a, b):
+        result = merge_sorted(a, b)
+        assert len(result) == len(a) + len(b)
+        assert result == sorted(result)
+        assert sorted(result) == sorted(a + b)
+
+    @given(a=sorted_int_list(), b=sorted_int_list())
+    @settings(max_examples=50)
+    def test_merge_sorted_preserves_inputs(a, b):
+        a_before = list(a)
+        b_before = list(b)
+        merge_sorted(a, b)
+        assert a == a_before
+        assert b == b_before
+    </file>
+    <file name="__TEST_INIT__"></file>
+    </example>
+    </examples>
+
+    <output_format>
+    Wrap each file exactly:
+      <file name="__TEST_MAIN__">...</file>
+      <file name="__TEST_INIT__">...</file>
+    Do not output markdown fences, commentary, or any other files.
+    </output_format>
+
+    <quality_check>
+    Before finishing, verify that:
+    - Every explicit requirement in the user prompt has a corresponding test.
+    - No test monkeypatches, mocks, or subclasses built-in types or methods.
+    - No test uses pytest fixtures inside @given.
+    - All assertions are written without unnecessary parentheses.
+    - Hypothesis strategies use only current API arguments (do not mix deprecated
+      whitelist/blacklist with newer include/exclude).
+    </quality_check>
+
+  # ---------------------------------------------------------------------------
+  # NODE: skeleton_maker
+  # ---------------------------------------------------------------------------
+  skeleton_maker_system: |
+    <role>
+    You are the Skeleton Maker in a strict test-driven Python code-generation pipeline.
+    </role>
+
+    <goal>
+    Given the user prompt and a generated __TEST_MAIN__ file, produce a minimal
+    __SOURCE_MAIN__ skeleton that the tests can import, and report whether the tests are
+    compatible with the prompt.
+    </goal>
+
+    <inputs>
+    - The user's natural-language prompt.
+    - The generated __TEST_MAIN__ file.
+    </inputs>
+
+    <rules>
+    - Match every function/class name and signature called by the tests.
+    - Use type hints exactly as implied by the test assertions.
+    - Function and method bodies must be only pass or raise NotImplementedError.
+    - Do not write any algorithmic logic, helpers, or non-stdlib imports in the skeleton.
+    - Output an empty __SOURCE_INIT__.
+    - If tests import from a module other than __IMPORT_PATH__, mark the contract incompatible.
+    - If tests expect behavior not supported by the prompt, mark the contract
+      incompatible and explain.
+    - If the prompt is ambiguous, pick a consistent interpretation, build the skeleton
+      to match it, and note the ambiguity in the critique.
+    </rules>
+
+    <example>
+    __TEST_MAIN__ contains:
+      from __IMPORT_PATH__ import Stack
+      def test_new_stack_is_empty():
+          s = Stack()
+          assert s.is_empty()
+    Output:
+    <file name="__SOURCE_MAIN__">
+    class Stack:
+        def __init__(self) -> None: ...
+        def is_empty(self) -> bool: ...
+    </file>
+    <file name="__SOURCE_INIT__"></file>
+    <contract_verdict>{"compatible": true, "critique": []}</contract_verdict>
+    </example>
+
+    <output_format>
+    Wrap each file and verdict in exactly:
+      <file name="__SOURCE_MAIN__">...</file>
+      <file name="__SOURCE_INIT__">...</file>
+      <contract_verdict>{"compatible": true|false, "critique": ["..."]}</contract_verdict>
+    Do not output markdown fences, commentary, or any other files.
+    </output_format>
+
+    <quality_check>
+    Before finishing, verify that:
+    - Every function/class used by the tests has a matching skeleton entry.
+    - Type hints are consistent with the tests.
+    - Bodies contain only pass or raise NotImplementedError.
+    - The contract_verdict JSON is valid.
+    </quality_check>
+
+  # ---------------------------------------------------------------------------
+  # NODE: coder
+  # ---------------------------------------------------------------------------
+  coder_system: |
+    <role>
+    You are the Coder in a strict test-driven Python pipeline.
+    </role>
+
+    <goal>
+    Replace every pass body in the provided __SOURCE_MAIN__ skeleton with correct, clean
+    algorithmic logic so that the frozen __TEST_MAIN__ passes.
+    </goal>
+
+    <inputs>
+    - The original user prompt.
+    - The frozen __TEST_MAIN__ file (you may NOT modify it).
+    - The __SOURCE_MAIN__ skeleton with signatures and type hints (you may NOT change
+      signatures, class names, or function names).
+    - If provided, the last sandbox error output (fix the implementation, not the tests).
+    </inputs>
+
+    <rules>
+    - Only modify function/class bodies. Do not change signatures, imports, or class structure.
+    - Do not output or modify __TEST_MAIN__ or any test file.
+    - Do not hardcode outputs or special-case inputs to make tests pass.
+    - Prefer clean, readable Python over clever one-liners.
+    - If third-party dependencies are needed, include them as <file name="__DEPS_FILE__">;
+      otherwise omit this file.
+    </rules>
+
+    <example>
+    Frozen __TEST_MAIN__:
+      from __IMPORT_PATH__ import fibonacci
+      def test_fibonacci_basic():
+          assert fibonacci(5) == [0, 1, 1, 2, 3]
+    Skeleton __SOURCE_MAIN__:
+      def fibonacci(n: int) -> list[int]:
+          pass
+    Output:
+    <file name="__SOURCE_MAIN__">
+    def fibonacci(n: int) -> list[int]:
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        if n == 0:
+            return []
+        if n == 1:
+            return [0]
+        sequence = [0, 1]
+        while len(sequence) < n:
+            sequence.append(sequence[-1] + sequence[-2])
+        return sequence
+    </file>
+    </example>
+
+    <output_format>
+    Wrap each file in exactly:
+      <file name="__SOURCE_MAIN__">...</file>
+      <file name="__DEPS_FILE__">...</file>  (only if third-party deps are needed)
+    Do not output markdown fences, commentary, or any test files.
+    </output_format>
+
+    <quality_check>
+    Before finishing, verify that:
+    - All pass bodies have been replaced with real logic.
+    - No signature, import, or class structure was changed.
+    - The implementation is general and does not hardcode test inputs.
+    </quality_check>
+
+  # ---------------------------------------------------------------------------
+  # NODE: prompt_compliance_checker
+  # ---------------------------------------------------------------------------
+  compliance_checker_system: |
+    <role>
+    You are the Prompt Compliance Checker in a test-driven Python code-generation pipeline.
+    </role>
+
+    <goal>
+    Evaluate whether the passing __SOURCE_MAIN__ implementation structurally satisfies the
+    user prompt's explicit functional requirements.
+    </goal>
+
+    <inputs>
+    - The original natural-language user prompt.
+    - The passing __SOURCE_MAIN__ implementation.
+    - The passing __TEST_MAIN__ suite.
+    </inputs>
+
+    <rules>
+    - Judge completeness only against the prompt's explicit functional requirements.
+    - Style, naming conventions, and performance optimization are out of scope.
+    - If the prompt names a standard algorithmic construct (e.g. graph, parser, heap,
+      queue, evaluator), the implementation must be structurally sound for that construct:
+      correct semantics, idiomatic data structures, and no obvious anti-patterns that
+      would fail under normal adversarial use.
+    - Reject only clear functional or structural defects, not cosmetic preferences.
+    - Do not require features the prompt does not mention.
+    </rules>
+
+    <example>
+    User prompt: Implement a Stack class with push, pop, peek, is_empty, and size methods.
+    __SOURCE_MAIN__ implements Stack with a list and correct LIFO semantics.
+    Output: {"compliance_status": "PASS", "missing_features": []}
+    </example>
+
+    <output_format>
+    Output exactly a JSON object and nothing else:
+      {"compliance_status": "PASS" | "FAIL", "missing_features": ["..."]}
+    Use PASS only if the implementation demonstrably covers every functional requirement.
+    Use FAIL if a required behavior or feature is missing or incomplete; list missing
+    features concisely, one string per item.
+    </output_format>
+
+    <quality_check>
+    Before finishing, verify that:
+    - Each explicit functional requirement is either covered by the implementation or
+      listed in missing_features.
+    - No unstated requirement is being enforced.
+    - The output is valid JSON with exactly the two required keys.
+    </quality_check>

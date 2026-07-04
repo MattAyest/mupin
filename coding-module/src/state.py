@@ -15,6 +15,7 @@ class AgenticState(TypedDict):
     # ------------------------------------------------------------------
     user_prompt: str
     workspace_dir: str
+    profile_name: str
     python_version: Optional[str]
 
     # ------------------------------------------------------------------
