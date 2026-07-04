@@ -864,6 +864,89 @@ Each row in `results.jsonl` now contains:
 - Implement authentication on `mupin-api-backbone` before exposing beyond internal modules.
 - Decide whether to remove the dev `POST /task` proxy once the backbone UI is ready.
 - Add observability: worker heartbeat, queue depth metrics, job duration histograms.
+- HumanEval+ runner: `PER_Q_TIMEOUT` (1800s) is too short — pipeline median
+  wall time per task is ~38 min, max 46 min. 17/164 tasks in the `full164`
+  run were cancelled before the worker ever started them (queue saturation at
+  `WORKER_MAX_JOBS=6`). Either raise the per-question timeout, raise
+  `WORKER_MAX_JOBS`, or run the suite in smaller batches.
+
+## 16. HumanEval+ scorer fix + re-score (2026-07-05)
+
+The `full164` HumanEval+ run reported 0/164 pass@1. Root cause was a scorer
+bug, not the model.
+
+### Scorer bug
+`benchmarks/humaneval_runner.py:180` wrapped the generated module in a
+free-standing `{ ... }` block before exec'ing it as a script, which is a
+`SyntaxError` at module level in Python. Every `completed` task failed with
+`unexpected output / SyntaxError: invalid syntax` pointing at the first line
+of the generated source. Fix: emit `generated` directly (no `{ ... }` wrapper).
+
+### New runner flag
+`humaneval_runner.py --rescore [--rescore-run RUN_ID] [--rescore-out FILE]`
+re-runs `score_problem` against the existing on-disk
+`.workspaces/<job_id>/src/main.py` for every `completed` row, without
+re-running the pipeline. Output goes to `humaneval_rescore.jsonl` by default.
+
+### Re-score results (full164)
+- Completed-and-scored subset (80): **78/80 = 97.5% pass@1**. The 2 failures
+  (HumanEval/116, HumanEval/145) are real assertion failures.
+- Timed-out-but-code-on-disk subset (66): **66/66 = 100% pass@1**. These jobs
+  finished in the DB (status `completed`, node `prompt_compliance_checker`)
+  ~31-46 min after submission, but the runner's `PER_Q_TIMEOUT=1800s` cap
+  fired first, so the runner cancelled/abandoned them and never scored them.
+- 17 tasks: cancelled before the worker started them (`Task cancelled before
+  start`) — no code generated. Caused by queue saturation: 164 tasks submitted
+  in batches of 6 against `WORKER_MAX_JOBS=6`.
+- 1 task: `exhausted` (sandbox loop limit hit).
+- **Combined pass@1: 144/164 = 87.8%** of the full dataset, with 18 tasks
+  unscored due to queue saturation (not a correctness failure).
+
+### Files
+- `benchmarks/humaneval_runner.py` — scorer fix (line ~180) + `--rescore` mode.
+- `benchmarks/humaneval_rescore.jsonl` — re-scored completed jobs.
+- `benchmarks/humaneval_rescore_timeouts.jsonl` — re-scored timed-out jobs
+  that had `src/main.py` on disk.
+
+## 17. HumanEval+ runner timeout-semantics fix (2026-07-05)
+
+The `full164` run's 83 "timeouts" were not real hangs — the DB showed 63 of
+them completed 31–46 min after submission, and 17 were cancelled before the
+worker ever started them. Two root causes in the runner:
+
+1. **Per-job clock started at submission, not worker start.** `PER_Q_TIMEOUT`
+   (1800s) was measured from the POST `/jobs` return, so a task that queued
+   25 min then ran 10 min got killed at the 1800s mark having only had 10 min
+   of real compute. With 164 tasks submitted 6-wide against
+   `WORKER_MAX_JOBS=6`, later tasks burned their whole budget in the queue.
+2. **Shared `total_timeout_hit` event killed all jobs when one hit the total
+   cap.** A single job noticing `elapsed_run >= TOTAL_TIMEOUT` set a shared
+   event that made every other poll loop abandon its job on the next
+   iteration — a whole-system kill switch misfiring as a per-job one.
+
+### Changes to `benchmarks/humaneval_runner.py`
+- **Slot-based submission.** Replaced `_submit_all` (submit-all-then-poll)
+  with a `ThreadPoolExecutor` where each worker thread loops
+  submit → poll → score → next problem. At most `--batch-size` jobs are in
+  flight at once, so queue wait is near zero. No more 164-thread fan-out.
+- **Per-job deadline from `started_at`.** The per-job timeout clock starts
+  when the worker picks the job up (the `started_at` field on the poll
+  response), not at submission. A short `QUEUE_GRACE = 120s` covers
+  submission acceptance only — with slot-based submission this should never
+  fire; if it does, it's a backbone health issue (status `queue_timeout`).
+- **Removed the whole-run kill switch.** Deleted `TOTAL_TIMEOUT`,
+  `total_timeout_hit`, `cancel_grace_deadline`, and the `--total-timeout`
+  CLI flag. Each job has its own deadline; there is no shared event.
+- **`PER_Q_TIMEOUT` 1800s → 3600s.** DB showed real pipeline work up to
+  46 min/task; 1h gives headroom. Exposed as `--per-q-timeout`.
+- **`started_at` parsing** handles the `Z` suffix from the backbone
+  (`2026-07-04T17:59:10.016159Z`) for Python <3.11 compatibility.
+
+### New CLI
+```
+python benchmarks/humaneval_runner.py --per-q-timeout 3600 --batch-size 6
+```
+`--total-timeout` is gone. The `--rescore` mode (added in §16) is unchanged.
 
 ## 15. Legacy: v0.1 Pipeline
 

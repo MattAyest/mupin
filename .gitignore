@@ -28,6 +28,8 @@ coding-module/benchmarks/*.out
 mupin-coding-module/benchmarks/results.jsonl
 mupin-coding-module/benchmarks/metrics.jsonl
 mupin-coding-module/benchmarks/*.out
+mupin-coding-module/benchmarks/humaneval_results.jsonl
+mupin-coding-module/benchmarks/humaneval_rescore*.jsonl
 
 # Ollama data & models
 ollama_data/
