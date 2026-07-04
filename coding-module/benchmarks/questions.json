@@ -61,5 +61,45 @@
     "id": "rle",
     "difficulty": "expert",
     "prompt": "Write a Python module with two functions: rle_encode(data: str) -> str and rle_decode(data: str) -> str. The input to rle_encode contains no digit characters. Encoding replaces each maximal run of one repeated character with that character followed by the decimal run length (a single 'a' becomes 'a1', four 'a's become 'a4'). Decoding is the exact inverse, so rle_decode(rle_encode(s)) == s for every valid s, and the empty string maps to the empty string. Raise ValueError if the input to rle_decode is not a valid encoding."
+  },
+  {
+    "id": "make_palindrome",
+    "difficulty": "hard",
+    "prompt": "Write a Python module with two functions: is_palindrome(string: str) -> bool and make_palindrome(string: str) -> str. is_palindrome returns True if the string reads the same forwards and backwards. make_palindrome returns the shortest palindrome that begins with the supplied string. The algorithm is: find the longest suffix of the input that is itself a palindrome; append to the end of the string the reverse of the prefix that precedes that palindromic suffix. The empty string returns the empty string."
+  },
+  {
+    "id": "decode_cyclic",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with two functions: encode_cyclic(s: str) -> str and decode_cyclic(s: str) -> str. encode_cyclic splits the input into consecutive groups of up to three characters and cycles each full group by moving its first character to the end (for example, 'abc' becomes 'bca' and 'def' becomes 'efd'). decode_cyclic takes a string produced by encode_cyclic and returns the original string. decode_cyclic must correctly reverse the operation for any input string."
+  },
+  {
+    "id": "triples_sum_to_zero",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with a function triples_sum_to_zero(numbers: list[int]) -> bool that returns True if there exist three distinct elements in the list that sum to zero, and False otherwise. The function should handle lists of moderate size efficiently."
+  },
+  {
+    "id": "smallest_change",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with a function smallest_change(numbers: list[int]) -> int that returns the minimum number of elements that must be changed to make the list palindromic. In one change, any element may be replaced by any other integer. A list with zero or one element requires zero changes."
+  },
+  {
+    "id": "closest_integer",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with a function closest_integer(value: str) -> int that takes a string representing a number and returns the closest integer. Standard rounding applies, except when the number is exactly halfway between two integers (e.g. '14.5' or '-14.5'): in that case round away from zero, so closest_integer('14.5') returns 15 and closest_integer('-14.5') returns -15. The input is always a valid number string."
+  },
+  {
+    "id": "get_row",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with a function get_row(grid: list[list[int]], target: int) -> list[tuple[int, int]] that finds all occurrences of target in a 2D grid where rows may have different lengths. Return a list of (row, column) coordinates, with rows sorted in ascending order; within each row, columns must be sorted in descending order. Return an empty list if the target is not found. Coordinates are zero-based."
+  },
+  {
+    "id": "sort_array",
+    "difficulty": "medium",
+    "prompt": "Write a Python module with a function sort_array(numbers: list[int]) -> list[int] that returns a sorted copy of the input without modifying it. If the sum of the first and last elements is odd, sort in ascending order; if the sum is even, sort in descending order. An empty list or single-element list is returned unchanged."
+  },
+  {
+    "id": "largest_prime_digit_sum",
+    "difficulty": "hard",
+    "prompt": "Write a Python module with a function largest_prime_digit_sum(numbers: list[int]) -> int. Consider only the positive integers in the list; ignore zero and negative values. Find the largest prime among those positive integers and return the sum of its decimal digits. If the list contains no positive primes or is empty, return 0."
   }
 ]

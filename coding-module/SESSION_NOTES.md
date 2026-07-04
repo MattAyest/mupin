@@ -720,18 +720,28 @@ Beyond pass rate, production-readiness also requires:
 5. Determinism: same prompt yields the same pass/fail outcome ≥ 80% of the time.
 
 ### Current status
-- Tier 2 custom suite: recently achieved 11/12 in early runs; 12/12 looks
-  reachable with the new profile system. Plan to expand to 20 questions once
-  the current set is stable at 100%.
+- Tier 2 custom suite: expanded from 12 to **20 questions**. Smoke tests on the
+  8 new HumanEval-inspired questions passed end-to-end.
 - Tier 1 smoke suite: already passes consistently.
 - Tiers 3 and 4: not yet implemented or measured.
 
+### Expanded question set (20 total)
+The 8 new questions added to `coding-module/benchmarks/questions.json` are:
+- `make_palindrome` (hard) — shortest palindrome prefix extension.
+- `decode_cyclic` (medium) — encode/decode string cycling groups of three.
+- `triples_sum_to_zero` (medium) — 3-sum decision problem.
+- `smallest_change` (medium) — min changes to make list palindromic.
+- `closest_integer` (medium) — round string number, ties away from zero.
+- `get_row` (medium) — 2D irregular-grid coordinate search.
+- `sort_array` (medium) — sort ascending/descending based on first+last parity.
+- `largest_prime_digit_sum` (hard) — largest prime digit sum from positive ints.
+
 ### Next steps
-1. Lock in Tier 2 performance by completing the current 3× full-suite run.
-2. Expand the custom suite from 12 to 20 questions.
-3. Add a HumanEval+ runner to `coding-module/benchmarks/`.
-4. Build the 10-question stress suite and measure baseline.
-5. Iterate prompts/profiles until all targets are met.
+1. Lock in Tier 2 performance by completing the current 3× full-suite run on
+   the expanded 20-question set.
+2. Add a HumanEval+ runner to `coding-module/benchmarks/` for Tier 3.
+3. Build the 10-question stress suite and measure baseline for Tier 4.
+4. Iterate prompts/profiles until all targets are met.
 
 ## 13. Legacy: v0.1 Pipeline
 
