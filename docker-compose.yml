@@ -1,22 +1,94 @@
 services:
-  coding-module-api:
+  redis:
+    image: redis:7-alpine
+    container_name: mupin_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mupin_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: mupin
+      POSTGRES_PASSWORD: mupin
+      POSTGRES_DB: mupin
+    volumes:
+      - backbone_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  mupin-api-backbone:
     build:
-      context: ./coding-module
-    container_name: coding_module_api
+      context: ./mupin-api-backbone
+    container_name: mupin_api_backbone
+    restart: always
+    ports:
+      - "8001:8000"
+    env_file:
+      - ./mupin-api-backbone/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mupin:mupin@postgres:5432/mupin
+      REDIS_URL: redis://redis:6379/0
+      BACKBONE_PORT: 8000
+      WORKSPACE_ROOT: /shared/workspaces
+    volumes:
+      - ./mupin-coding-module/.workspaces:/shared/workspaces
+    depends_on:
+      - postgres
+      - redis
+
+  mupin-coding-worker:
+    build:
+      context: ./mupin-coding-module
+    container_name: mupin_coding_worker
+    restart: always
+    command: ["python", "-m", "src.worker"]
+    env_file:
+      - ./mupin-coding-module/.env
+    environment:
+      BACKBONE_URL: http://mupin-api-backbone:8000
+      REDIS_URL: redis://redis:6379/0
+      WORKER_MAX_JOBS: "4"
+      WORKSPACE_ROOT: /app/.workspaces
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      # Map docker.sock so the worker can spin up sibling test containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared workspace volume (must match backbone mount)
+      - ./mupin-coding-module/.workspaces:/app/.workspaces
+      # Per-node LLM routing config
+      - ./mupin-coding-module/llm_config.yaml:/app/llm_config.yaml:ro
+      # Language profiles
+      - ./mupin-coding-module/profiles:/app/profiles:ro
+    depends_on:
+      - redis
+      - postgres
+      - mupin-api-backbone
+
+  mupin-coding-api:
+    build:
+      context: ./mupin-coding-module
+    container_name: mupin_coding_api
     restart: always
     ports:
       - "8000:8000"
-    volumes:
-      # Map docker.sock so the container can spin up sibling containers for testing
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Map the module workspaces directory so files are accessible on the host
-      - ./coding-module/.workspaces:/app/.workspaces
-      # Mount module config read-only so per-node model choices can change without a rebuild
-      - ./coding-module/llm_config.yaml:/app/llm_config.yaml:ro
     env_file:
-      - ./coding-module/.env
+      - ./mupin-coding-module/.env
     environment:
-      # Pass the host user identity down so sandbox test containers can run
-      # unprivileged instead of as root. Defaults to 1000:1000.
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
+      BACKBONE_URL: http://mupin-api-backbone:8000
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mupin-coding-module/.workspaces:/app/.workspaces
+      - ./mupin-coding-module/llm_config.yaml:/app/llm_config.yaml:ro
+      - ./mupin-coding-module/profiles:/app/profiles:ro
+    depends_on:
+      - mupin-api-backbone
+      - mupin-coding-worker
+
+volumes:
+  backbone_pg_data:

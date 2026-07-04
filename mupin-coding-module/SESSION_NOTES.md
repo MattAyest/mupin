@@ -722,6 +722,16 @@ Beyond pass rate, production-readiness also requires:
 ### Current status
 - Tier 2 custom suite: expanded from 12 to **20 questions**. Smoke tests on the
   8 new HumanEval-inspired questions passed end-to-end.
+- Full 20-question v4 reliability run (10×) was started on 2026-07-04 and stopped
+  during round 8 to begin the v0.3 backbone refactor. Completed rounds:
+  - R1: 19/20 passed (avg 302.7s)
+  - R2: 20/20 passed (avg 296.9s)
+  - R3: 20/20 passed (avg 300.8s)
+  - R4: 19/20 passed (avg 219.4s)
+  - R5: 19/20 passed (avg 383.3s)
+  - R6: 19/20 passed (avg 293.5s)
+  - R7: 20/20 passed (avg 197.1s)
+  - Aggregate over completed rounds: **136/140 (97.1%)**
 - Tier 1 smoke suite: already passes consistently.
 - Tiers 3 and 4: not yet implemented or measured.
 
@@ -754,13 +764,12 @@ shared job infrastructure service.
   - Inter-module API only (not a public consumer API).
   - Direct submission accepted during initial setup/testing.
   - Owns Redis (ARQ), Postgres, and the REST API.
-  - Writes all job state and results; workers never touch the DB directly.
+  - Writes all job state and results; workers post progress/finalize via internal endpoints.
 - `mupin-coding-module/` — renamed from `coding-module/`. Becomes a pure worker.
   - Consumes `coding` jobs from the backbone queue.
   - Runs the existing LangGraph pipeline.
-  - Returns results via the ARQ result callback; the backbone persists them.
-  - Keeps a dev-only `POST /task` convenience endpoint temporarily, to be
-    removed once the backbone is fully wired.
+  - Returns results via the ARQ result callback and posts terminal status to the backbone.
+  - Keeps a dev-only `POST /task` convenience endpoint that proxies to the backbone.
 
 ### Implementation choices
 
@@ -770,7 +779,7 @@ shared job infrastructure service.
 | Persistence | SQLAlchemy async + asyncpg on Postgres |
 | Worker concurrency | 4 jobs per coding worker (env `WORKER_MAX_JOBS`) |
 | Cancellation | Cooperative (worker checks `cancel_requested` between graph nodes) |
-| Worker-to-backbone result path | ARQ result callback (Option A) |
+| Worker-to-backbone result path | ARQ result callback + internal finalize endpoint |
 | Local deployment | Single root `docker-compose.yml` for backbone + worker |
 | Benchmark runner batch size | 20 jobs in flight at a time |
 | Authentication | Deferred; noted as future addition |
@@ -781,7 +790,51 @@ Add API authentication to `mupin-api-backbone` before exposing it beyond interna
 Mupin modules. Options to evaluate: API keys, mTLS, or short-lived signed JWTs
 issued by the Mupin orchestrator. Record the chosen scheme here once designed.
 
-## 14. Legacy: v0.1 Pipeline
+## 14. Benchmark runner now splits queue wait from processing time
+
+Added `started_at` to the backbone job model so the benchmark runner can
+distinguish time spent waiting for a worker slot from actual pipeline work.
+
+### Motivation
+The full 20-question suite showed per-question totals of 800–1300s while the
+actual LLM + sandbox work was often only 40–60s. The difference was queue wait
+caused by 4 concurrent worker slots and a few long-running questions such as
+`csv_parse`.
+
+### Changes
+- `mupin-api-backbone/src/db.py` — added nullable `started_at` column to `jobs`.
+- `mupin-api-backbone/src/jobs.py` — `mark_job_running` sets `started_at`.
+- `mupin-api-backbone/src/models.py` — `JobResponse` exposes `started_at`.
+- `mupin-api-backbone/src/main.py` — new `POST /internal/jobs/{job_id}/started`
+  endpoint; `_job_to_response` includes `started_at`.
+- `mupin-coding-module/src/worker.py` — worker calls `_mark_started(job_id)`
+  immediately when ARQ invokes `run_job`.
+- `mupin-coding-module/benchmarks/runner.py` — computes
+  `queue_wait_seconds` and `processing_seconds`, writes them to `results.jsonl`,
+  and prints them in the run summary.
+
+### Result schema additions
+Each row in `results.jsonl` now contains:
+- `started_at` — ISO-8601 timestamp when the worker began execution.
+- `queue_wait_seconds` — time from runner submission to worker start.
+- `processing_seconds` — time from worker start to completion.
+- `elapsed_seconds` — unchanged total time from submission to completion.
+
+### Next steps
+- Re-run the full 20-question suite and compare `processing_seconds` across runs
+  instead of `elapsed_seconds`.
+- Decide whether to reduce queue wait by increasing `WORKER_MAX_JOBS`, adding
+  priority queues, or running hard questions in a separate batch.
+
+## 15. Open Issues / Next Steps for v0.3
+
+- Add automated tests for the backbone API contract (submit, poll, cancel, finalize).
+- Verify benchmark runner throughput with 20 concurrent jobs through the backbone.
+- Implement authentication on `mupin-api-backbone` before exposing beyond internal modules.
+- Decide whether to remove the dev `POST /task` proxy once the backbone UI is ready.
+- Add observability: worker heartbeat, queue depth metrics, job duration histograms.
+
+## 15. Legacy: v0.1 Pipeline
 
 The previous system used eight nodes: `workspace_loader` → `architect_node` → `test_writer` ↔ `contract_verifier` → `code_writer` ↔ `static_analyzer` → `deterministic_verifier` → `error_distiller` → `archivist_node` / `FINISH`.
 

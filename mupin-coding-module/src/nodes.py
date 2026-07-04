@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import json
 import os
 import re
@@ -196,12 +197,16 @@ def _build_llm(node_name):
             client_kwargs = {
                 "headers": {"Authorization": f"Bearer {key}"},
                 "timeout": OLLAMA_TIMEOUT,
+                "limits": httpx.Limits(max_connections=16, max_keepalive_connections=8),
             }
         else:
             base_url = os.getenv(
                 api_key_env_var or "OLLAMA_BASE_URL", "http://localhost:11434"
             )
-            client_kwargs = {"timeout": OLLAMA_TIMEOUT}
+            client_kwargs = {
+                "timeout": OLLAMA_TIMEOUT,
+                "limits": httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            }
 
         return ChatOllama(
             model=model,
@@ -313,6 +318,7 @@ def _invoke_with_retry(
     workspace: str = "",
     max_attempts: int | None = None,
     timeout_seconds: float | None = None,
+    state: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Call a node's LLM with a hard per-attempt timeout, retrying on transient
     errors (network drops, SSL EOF, incomplete reads, provider 5xx, slow streams).
@@ -328,11 +334,18 @@ def _invoke_with_retry(
     ollama_providers = ("ollama-cloud", "ollama")
     invoke_kwargs = {"stream": True} if provider in ollama_providers else {}
 
+    # Cooperative cancellation: state may carry an event/executor from the runner.
+    cancel_event = state.get("cancel_event") if state else None
+    executor = state.get("llm_executor") if state else None
+
     input_tokens = _count_message_tokens(messages)
     usage_entries: list[dict] = []
     last_error: Exception | None = None
 
     for attempt in range(1, max_attempts + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError("Task cancellation requested before LLM attempt")
+
         started = time.perf_counter()
         try:
             llm = get_llm(node_name)
@@ -343,9 +356,19 @@ def _invoke_with_retry(
                 metadata = getattr(response, "response_metadata", {}) or {}
                 return content, metadata
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            if executor is not None:
                 future = executor.submit(_call)
+            else:
+                local_executor = ThreadPoolExecutor(max_workers=1)
+                future = local_executor.submit(_call)
+
+            try:
                 content, metadata = future.result(timeout=timeout_seconds)
+            finally:
+                if executor is None:
+                    local_executor.shutdown(wait=False, cancel_futures=True)
+                elif cancel_event is not None and cancel_event.is_set():
+                    future.cancel()
 
             elapsed = time.perf_counter() - started
             output_tokens = _estimate_tokens(content)
@@ -588,6 +611,32 @@ def resolve_host_path(container_path: str) -> str:
     return abs_path
 
 
+def cleanup_sandbox_for_task(task_id: str) -> None:
+    """Remove any Docker containers spawned for a given task ID.
+
+    Sandbox containers are named `{task_id}-install-{loop}` and
+    `{task_id}-verify-{loop}`. This is called by the runner on task end,
+    cancellation, or timeout to ensure nothing lingers.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        names = [n.strip() for n in result.stdout.splitlines() if n.strip().startswith(task_id) and ("-install-" in n or "-verify-" in n)]
+        if names:
+            subprocess.run(
+                ["docker", "rm", "-f", "--volumes"] + names,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+    except Exception:
+        pass
+
+
 def setup_workspace(workspace: str, profile: Profile) -> None:
     """Write the deterministic sandbox scaffolding for a task.
 
@@ -758,6 +807,7 @@ def test_designer(state: AgenticState):
             "test_designer",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
+            state=state,
         )
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("test_designer", state, e, workspace)
@@ -843,6 +893,7 @@ def skeleton_maker(state: AgenticState):
             "skeleton_maker",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
+            state=state,
         )
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("skeleton_maker", state, e, workspace)
@@ -1000,6 +1051,7 @@ def coder(state: AgenticState):
             "coder",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
+            state=state,
         )
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("coder", state, e, workspace)
@@ -1107,6 +1159,8 @@ def sandbox_arbiter(state: AgenticState):
     # Base hardening applied to both install and verification containers.
     # The container runs as the host user, not root, so files it writes to
     # the workspace remain owned by the host user.
+    task_id = state.get("task_id", workspace.split("/")[-1])
+
     hardening_flags = [
         f"--user={host_uid}:{host_gid}",
         f"--memory={memory_limit}",
@@ -1116,6 +1170,7 @@ def sandbox_arbiter(state: AgenticState):
         "--ulimit=nofile=1024:1024",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        "--stop-timeout=10",
         "-v",
         f"{resolve_host_path(workspace)}:/workspace",
         "-w",
@@ -1149,7 +1204,7 @@ def sandbox_arbiter(state: AgenticState):
         f"pip install -q --target /workspace/.deps -r /workspace/{deps_file}"
     )))
     install_cmd = (
-        ["docker", "run", "--rm"]
+        ["docker", "run", "--rm", "--name", f"{task_id}-install-{loop}"]
         + hardening_flags
         + tmpfs_flags
         + install_env
@@ -1165,7 +1220,7 @@ def sandbox_arbiter(state: AgenticState):
     ]
     arbiter_script = profile.resolve(profile.sandbox_value("verify_command"))
     arbiter_cmd = (
-        ["docker", "run", "--rm", "--network", "none", "--read-only"]
+        ["docker", "run", "--rm", "--network", "none", "--read-only", "--name", f"{task_id}-verify-{loop}"]
         + hardening_flags
         + tmpfs_flags
         + verify_env
@@ -1466,6 +1521,7 @@ def prompt_compliance_checker(state: AgenticState):
             "prompt_compliance_checker",
             [SystemMessage(content=system), HumanMessage(content=user_prompt)],
             workspace,
+            state=state,
         )
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("prompt_compliance_checker", state, e, workspace)

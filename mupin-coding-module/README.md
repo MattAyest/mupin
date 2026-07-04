@@ -1,6 +1,6 @@
-# Coding Module — v0.2
+# Coding Module — v0.3
 
-A self-healing Python code-generation microservice. Submit a natural-language prompt and a LangGraph agent:
+A self-healing Python code-generation worker. Submit a natural-language prompt via the Mupin API Backbone and a LangGraph agent:
 
 1. Designs a lean baseline test suite from the prompt.
 2. Derives a matching skeleton from those tests and checks contract compatibility.
@@ -10,8 +10,7 @@ A self-healing Python code-generation microservice. Submit a natural-language pr
 
 If a step fails, the agent routes back to the node that can fix it and tries again. Nodes can also retry themselves when a transient LLM infrastructure fault occurs (timeout, 5xx/524, connection drop), up to the configured `infra_max_retries_per_node`.
 
-> This is **v0.2**. The older eight-node pipeline is preserved only in git history.
-> A **v0.3** refactor to a queue-based backbone architecture (`mupin-api-backbone` + `mupin-coding-module`) is planned; see `SESSION_NOTES.md` for the latest design.
+> This is **v0.3**. The module is now a pure ARQ worker consuming `coding` jobs from `mupin-api-backbone`. A dev convenience `POST /task` endpoint still proxies to the backbone for local use. The older eight-node v0.1 pipeline is preserved only in git history.
 
 ---
 
@@ -72,24 +71,69 @@ Swap models without rebuilding — `llm_config.yaml` is mounted read-only at run
 ## Getting started
 
 1. Copy `.env.example` to `.env` and set `OLLAMA_API_KEY`.
-2. Build and start:
+2. Build and start the full stack from the repo root:
    ```bash
+   cd ..
    docker compose up --build -d
    ```
-3. Submit a task:
+   This starts Postgres, Redis, `mupin-api-backbone` (port 8001), the coding worker, and a dev proxy (port 8000).
+3. Submit a job through the backbone:
    ```bash
-   curl -X POST http://localhost:8000/task \
+   curl -X POST http://localhost:8001/jobs \
      -H "Content-Type: application/json" \
-     -d '{"prompt": "Write a Python module with a single function fibonacci(n: int) -> list[int] that returns the first n Fibonacci numbers."}'
+     -d '{"job_type": "coding", "payload": {"prompt": "Write a Python module with a single function fibonacci(n: int) -> list[int] that returns the first n Fibonacci numbers."}}'
    ```
 4. Poll status:
    ```bash
-   curl http://localhost:8000/task/<task_id>
+   curl http://localhost:8001/jobs/<job_id>
    ```
 5. Tail the thought log:
    ```bash
-   curl http://localhost:8000/task/<task_id>/log
+   curl http://localhost:8001/jobs/<job_id>/log
    ```
+
+The legacy dev endpoint still works and proxies to the backbone:
+```bash
+curl -X POST http://localhost:8000/task \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "..."}'
+```
+
+### Benchmark runner
+
+```bash
+# Run all questions concurrently (default)
+python3 benchmarks/runner.py
+
+# Specific questions, concurrent
+python3 benchmarks/runner.py --ids fibonacci stack word_frequency
+
+# Sequential mode (one at a time)
+python3 benchmarks/runner.py --sequential
+
+# Adjust total-run cap (default 3600s = 1 hour)
+python3 benchmarks/runner.py --total-timeout 7200
+
+# On total timeout: finish in-progress jobs instead of cancelling them
+python3 benchmarks/runner.py --total-timeout-action finish_in_progress
+```
+
+The runner also respects environment variables:
+- `MUPIN_TOTAL_TIMEOUT` — total run timeout in seconds (default `3600`)
+- `MUPIN_TOTAL_TIMEOUT_ACTION` — `cancel` or `finish_in_progress` (default `cancel`)
+
+Per-question timeout defaults to `2400`s (40 min) and can be overridden with `--timeout`.
+
+### Docker maintenance
+
+The sandbox can leave exited containers and build cache behind. Run the prune script occasionally:
+
+```bash
+./scripts/docker-prune.sh --dry-run   # preview
+./scripts/docker-prune.sh            # clean
+```
+
+This removes exited containers (except persistent services), dangling build cache, and unused images older than 24h.
 
 ### Status values
 
@@ -202,6 +246,14 @@ python benchmarks/runner.py --diagnostics
 
 Results append to `benchmarks/results.jsonl` and `benchmarks/metrics.jsonl`.
 
+Each result row records three durations:
+- `elapsed_seconds` — total wall-clock time from submission to completion.
+- `queue_wait_seconds` — time spent waiting for a worker slot (`started_at - start_time`).
+- `processing_seconds` — actual pipeline execution time (`end_time - started_at`).
+
+This split makes it easy to tell whether a slow question is slow because of
+provider/worker work or because it sat behind other jobs in the ARQ queue.
+
 ---
 
 ## Local development (without Docker)
@@ -216,7 +268,8 @@ The verifier still spawns sibling test containers against the host Docker socket
 
 ## Version history
 
-- **v0.2** (current) — five-node pipeline: `test_designer`, `skeleton_maker`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`. Added per-node transient LLM fault retry and self-loop conditional edges.
+- **v0.3** (current) — worker consumes `coding` jobs from `mupin-api-backbone` via ARQ/Redis. Backbone persists job state in Postgres. Dev API at `localhost:8000` proxies to backbone at `localhost:8001`.
+- **v0.2** — five-node pipeline: `test_designer`, `skeleton_maker`, `coder`, `sandbox_arbiter`, `prompt_compliance_checker`. Added per-node transient LLM fault retry and self-loop conditional edges.
 - **v0.1** — eight-node pipeline with separate architect, test writer, contract verifier, code writer, static analyzer, deterministic verifier, error distiller, and archivist. Recoverable from git history if needed.
 
 ### Latest benchmark snapshot

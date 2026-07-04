@@ -23,5 +23,5 @@ COPY src/ ./src/
 # Make sure we have a directory for workspaces
 RUN mkdir -p .workspaces
 
-# Run the FastAPI server
+# Default command: dev API proxy. Override to "python -m src.worker" for ARQ worker.
 CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
