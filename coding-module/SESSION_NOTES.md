@@ -743,7 +743,45 @@ The 8 new questions added to `coding-module/benchmarks/questions.json` are:
 3. Build the 10-question stress suite and measure baseline for Tier 4.
 4. Iterate prompts/profiles until all targets are met.
 
-## 13. Legacy: v0.1 Pipeline
+## 13. v0.3 Backbone Architecture Decision
+
+Decided to evolve the Coding Module into a true Mupin backbone by introducing a
+shared job infrastructure service.
+
+### Module boundaries
+
+- `mupin-api-backbone/` — shared job submission, queue, persistence, and dispatch.
+  - Inter-module API only (not a public consumer API).
+  - Direct submission accepted during initial setup/testing.
+  - Owns Redis (ARQ), Postgres, and the REST API.
+  - Writes all job state and results; workers never touch the DB directly.
+- `mupin-coding-module/` — renamed from `coding-module/`. Becomes a pure worker.
+  - Consumes `coding` jobs from the backbone queue.
+  - Runs the existing LangGraph pipeline.
+  - Returns results via the ARQ result callback; the backbone persists them.
+  - Keeps a dev-only `POST /task` convenience endpoint temporarily, to be
+    removed once the backbone is fully wired.
+
+### Implementation choices
+
+| Decision | Choice |
+|---|---|
+| Queue | ARQ on Redis |
+| Persistence | SQLAlchemy async + asyncpg on Postgres |
+| Worker concurrency | 4 jobs per coding worker (env `WORKER_MAX_JOBS`) |
+| Cancellation | Cooperative (worker checks `cancel_requested` between graph nodes) |
+| Worker-to-backbone result path | ARQ result callback (Option A) |
+| Local deployment | Single root `docker-compose.yml` for backbone + worker |
+| Benchmark runner batch size | 20 jobs in flight at a time |
+| Authentication | Deferred; noted as future addition |
+
+### Auth future addition
+
+Add API authentication to `mupin-api-backbone` before exposing it beyond internal
+Mupin modules. Options to evaluate: API keys, mTLS, or short-lived signed JWTs
+issued by the Mupin orchestrator. Record the chosen scheme here once designed.
+
+## 14. Legacy: v0.1 Pipeline
 
 The previous system used eight nodes: `workspace_loader` → `architect_node` → `test_writer` ↔ `contract_verifier` → `code_writer` ↔ `static_analyzer` → `deterministic_verifier` → `error_distiller` → `archivist_node` / `FINISH`.
 

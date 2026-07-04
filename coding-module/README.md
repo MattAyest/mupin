@@ -11,6 +11,7 @@ A self-healing Python code-generation microservice. Submit a natural-language pr
 If a step fails, the agent routes back to the node that can fix it and tries again. Nodes can also retry themselves when a transient LLM infrastructure fault occurs (timeout, 5xx/524, connection drop), up to the configured `infra_max_retries_per_node`.
 
 > This is **v0.2**. The older eight-node pipeline is preserved only in git history.
+> A **v0.3** refactor to a queue-based backbone architecture (`mupin-api-backbone` + `mupin-coding-module`) is planned; see `SESSION_NOTES.md` for the latest design.
 
 ---
 
