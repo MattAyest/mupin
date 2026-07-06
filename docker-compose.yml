@@ -50,7 +50,7 @@ services:
     environment:
       BACKBONE_URL: http://mupin-api-backbone:8000
       REDIS_URL: redis://redis:6379/0
-      WORKER_MAX_JOBS: "4"
+      WORKER_MAX_JOBS: "6"
       WORKSPACE_ROOT: /app/.workspaces
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -63,6 +63,8 @@ services:
       - ./mupin-coding-module/llm_config.yaml:/app/llm_config.yaml:ro
       # Language profiles
       - ./mupin-coding-module/profiles:/app/profiles:ro
+      # Benchmark runners + results (rw so runners can append jsonl)
+      - ./mupin-coding-module/benchmarks:/app/benchmarks:rw
     depends_on:
       - redis
       - postgres

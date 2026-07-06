@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-Benchmark runner for the Coding Module.
+Benchmark runner for the Coding Module (Tier 2 custom 20-question suite).
 
 Usage:
-    python benchmarks/runner.py                        # run all questions concurrently
+    python benchmarks/runner.py                        # run all questions (slot-based, 6 wide)
     python benchmarks/runner.py --ids fibonacci stack  # run specific questions
     python benchmarks/runner.py --sequential           # run one question at a time
-    python benchmarks/runner.py --batch-size 20        # cap concurrent submissions
+    python benchmarks/runner.py --batch-size 6         # cap concurrent submissions (default 20)
+    python benchmarks/runner.py --per-q-timeout 3600   # per-job cap, measured from worker start
     python benchmarks/runner.py --summary              # print history of past runs
+    python benchmarks/runner.py --diagnostics          # per-node token/time breakdown
 
 Results are appended to benchmarks/results.jsonl — one JSON line per question.
+Per-node metrics are appended to benchmarks/metrics.jsonl.
+
+Execution model: slot-based. At most `--batch-size` jobs are in flight at once;
+each worker thread loops submit -> poll -> record -> next problem. Queue wait is
+therefore near zero, and the per-job timeout (--per-q-timeout) measures real
+pipeline work, measured from the worker's `started_at` timestamp -- NOT from
+submission time. There is no whole-run kill switch.
 """
 
 import argparse
@@ -29,15 +38,18 @@ QUESTIONS_FILE = Path(__file__).parent / "questions.json"
 RESULTS_FILE = Path(__file__).parent / "results.jsonl"
 METRICS_FILE = Path(__file__).parent / "metrics.jsonl"
 
-POLL_INTERVAL = 5   # seconds between status polls
-TIMEOUT = 2400      # seconds before we give up on a single task (40 min)
-                    # Expert/hard questions may override this via questions.json
-DEFAULT_BATCH_SIZE = 20  # per SESSION_NOTES v0.3 decision
-
-# Total-run timeout: protects long benchmark suites from running forever.
-# Each question still has its own per-question TIMEOUT above.
-TOTAL_TIMEOUT = int(os.environ.get("MUPIN_TOTAL_TIMEOUT", "3600"))  # 1 hour default
-TOTAL_TIMEOUT_ACTION = os.environ.get("MUPIN_TOTAL_TIMEOUT_ACTION", "cancel")  # 'cancel' or 'finish_in_progress'
+POLL_INTERVAL = 5          # seconds between status polls
+PER_Q_TIMEOUT = 3600      # 1h per question, measured from worker start (started_at).
+                           # The full pipeline can take up to ~46 min for hard questions;
+                           # 1h gives comfortable headroom.
+QUEUE_GRACE = 600          # seconds to wait for the worker to pick up a submitted
+                           # job (i.e. for `started_at` to appear). With slot-based
+                           # submission a job is only submitted when a slot is free, so
+                           # pickup is normally within seconds. The grace is a safety
+                           # net for a dead/sick backbone, NOT a queue-wait cap -- if
+                           # it fires, something is genuinely wrong. 600s gives wide
+                           # headroom for ARQ polling + Redis round-trips.
+DEFAULT_BATCH_SIZE = 20    # Tier 2 suite is only 20 questions; default opens all slots.
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +121,14 @@ def _started_at_from_job(data: dict) -> datetime | None:
     started = data.get("started_at")
     if started:
         try:
-            return datetime.fromisoformat(started)
+            return datetime.fromisoformat(started.replace("Z", "+00:00"))
         except Exception:
             pass
     for entry in data.get("node_history", []) or []:
         started = entry.get("started_at")
         if started:
             try:
-                return datetime.fromisoformat(started)
+                return datetime.fromisoformat(started.replace("Z", "+00:00"))
             except Exception:
                 pass
     return None
@@ -208,239 +220,194 @@ def _build_result(
     return result
 
 
-def run_question_sequential(
+# ---------------------------------------------------------------------------
+# Per-question processing (shared by sequential and slot-based modes)
+# ---------------------------------------------------------------------------
+
+def _process_one(
     question: dict,
     run_id: str,
-    run_start: float,
-    total_timeout: int = TOTAL_TIMEOUT,
-    total_timeout_action: str = TOTAL_TIMEOUT_ACTION,
+    per_q_timeout: int,
+    label_lines_prefix: bool = True,
 ) -> dict:
-    """Run a single question end-to-end, polling until it settles."""
+    """Submit one question, poll until settled, and return the result row.
+
+    Slot-based execution: each worker thread calls this in a loop, so at most
+    `batch_size` jobs are ever in flight at once. Queue wait is therefore near
+    zero, and the per-job timeout measures real pipeline work, not queue time.
+
+    The per-job deadline is computed from `started_at` (set by the worker when
+    it picks the job up), not from submission time. A short QUEUE_GRACE window
+    covers submission acceptance only.
+    """
     qid = question["id"]
+    submit_time = time.time()
+    submit_iso = datetime.now(timezone.utc).isoformat()
 
-    # Check total-run budget before even starting this question.
-    elapsed_run = time.time() - run_start
-    if elapsed_run >= total_timeout:
-        print(f"\n  [{qid}] SKIPPED — total run timeout ({total_timeout}s) already exceeded")
-        now_iso = datetime.now(timezone.utc).isoformat()
-        return _build_result(
-            run_id, question, None, run_start, now_iso, "total_timeout",
-            error=f"Skipped: total run timeout ({total_timeout}s) exceeded before start",
-        )
+    if label_lines_prefix:
+        print(f"\n{'─' * 60}")
+        print(f"  [{qid}]  difficulty={question['difficulty']}")
+        print(f"  {question['prompt'][:100]}...")
+        print(f"{'─' * 60}")
 
-    print(f"\n{'─' * 60}")
-    print(f"  [{qid}]  difficulty={question['difficulty']}")
-    print(f"  {question['prompt'][:100]}...")
-    print(f"{'─' * 60}")
-
-    start_time = time.time()
-    start_iso = datetime.now(timezone.utc).isoformat()
-
+    # Submit (with a short grace for the POST to return).
     try:
         task_id = submit_task(question["prompt"])
     except Exception as e:
-        print(f"  SUBMIT ERROR: {e}")
-        return _build_result(run_id, question, None, start_time, start_iso, "submit_error", error=str(e))
+        print(f"  [{qid}] SUBMIT ERROR: {e}")
+        return _build_result(run_id, question, None, submit_time, submit_iso,
+                             "submit_error", error=str(e))
 
-    print(f"  task_id={task_id}")
-    last_node = None
+    print(f"  [{qid:<20}] submitted {task_id}")
+
+    # Poll until settled or per-job timeout (clock starts at worker start).
+    deadline = None              # set once started_at appears
+    submit_deadline = submit_time + QUEUE_GRACE
     last_data = {}
-    per_q_timeout = question.get("timeout_seconds", TIMEOUT)
-    deadline = start_time + per_q_timeout
-    cancel_grace_deadline: float | None = None
+    last_node = None
 
-    while time.time() < deadline:
-        # Check total-run budget during the question too.
-        if time.time() - run_start >= total_timeout:
-            if total_timeout_action == "cancel":
-                if cancel_grace_deadline is None:
-                    cancel_task(task_id)
-                    cancel_grace_deadline = time.time() + 60
-                    print(f"\n  TOTAL RUN TIMEOUT ({total_timeout}s) — cancelling [{qid}], waiting 60s grace")
-                elif time.time() > cancel_grace_deadline:
-                    print(f"\n  [{qid}] FORCE total_timeout after cancellation grace period")
-                    return _build_result(run_id, question, task_id, start_time, start_iso, "total_timeout", last_data,
-                                            error=f"Total run timeout ({total_timeout}s) exceeded; cancellation grace period elapsed")
-            else:
-                print(f"\n  TOTAL RUN TIMEOUT ({total_timeout}s) — letting [{qid}] finish, but run will stop after it")
+    while True:
+        # If the worker hasn't started yet, only the submission grace applies.
+        if deadline is None and time.time() > submit_deadline:
+            # Worker hasn't picked the job up within QUEUE_GRACE -- with
+            # slot-based submission this should never happen; treat as a
+            # backbone health issue and fail fast.
+            cancel_task(task_id)
+            result = _build_result(run_id, question, task_id, submit_time, submit_iso,
+                                   "queue_timeout", last_data,
+                                   error=f"Worker did not start within {QUEUE_GRACE}s "
+                                         f"(backbone health issue)")
+            print(f"  [{qid:<20}] QUEUE_TIMEOUT (no worker start in {QUEUE_GRACE}s)")
+            return result
+
+        if deadline is not None and time.time() > deadline:
+            cancel_task(task_id)
+            result = _build_result(run_id, question, task_id, submit_time, submit_iso,
+                                   "timeout", last_data,
+                                   error=f"Timed out after {per_q_timeout}s of worker time")
+            print(f"  [{qid:<20}] TIMEOUT after {result['elapsed_seconds']}s "
+                  f"(worker budget {per_q_timeout}s exceeded; "
+                  f"last node={last_data.get('current_node')} "
+                  f"sbox={last_data.get('sandbox_loop_count', 0)})")
+            return result
 
         try:
             data = poll_task(task_id)
             last_data = data
         except Exception as e:
-            print(f"  POLL ERROR: {e} — retrying in {POLL_INTERVAL}s")
+            print(f"  [{qid:<20}] poll_error: {e} — retrying in {POLL_INTERVAL}s")
             time.sleep(POLL_INTERVAL)
             continue
 
         status = data.get("status")
         node = data.get("current_node")
-        elapsed = round(time.time() - start_time, 1)
+
+        # Lock in the per-job deadline once the worker has started.
+        if deadline is None and data.get("started_at"):
+            try:
+                started_iso = data["started_at"].replace("Z", "+00:00")
+                started_dt = datetime.fromisoformat(started_iso)
+                deadline = started_dt.timestamp() + per_q_timeout
+                print(f"  [{qid:<20}] worker started; deadline set "
+                      f"(+{per_q_timeout}s from {data['started_at']})")
+            except Exception:
+                # If we can't parse started_at, fall back to submission time so
+                # we don't lose the timeout entirely.
+                deadline = submit_time + per_q_timeout
 
         if node != last_node:
-            print(
-                f"  {elapsed:>7.1f}s  → {node}  "
-                f"(sandbox_loops={data.get('sandbox_loop_count', 0)} "
-                f"compliance_loops={data.get('compliance_loop_count', 0)})"
-            )
             last_node = node
+            print(f"  [{qid:<20}] {time.time() - submit_time:>7.1f}s -> {node}  "
+                  f"(sbox={data.get('sandbox_loop_count', 0)} "
+                  f"comp={data.get('compliance_loop_count', 0)})")
 
-        if status in ("completed", "failed", "cancelled", "exhausted", "total_timeout"):
-            result = _build_result(run_id, question, task_id, start_time, start_iso, status, data)
+        if status in ("completed", "failed", "cancelled", "exhausted", "infra_exhausted"):
+            result = _build_result(run_id, question, task_id, submit_time, submit_iso, status, data)
             verdict = "PASS" if status == "completed" and result["files_generated"] else "FAIL"
             print(
-            f"\n  {verdict}  in {result['elapsed_seconds']}s  |  "
-            f"queue={result.get('queue_wait_seconds', 0.0):.1f}s  "
-            f"process={result.get('processing_seconds', result['elapsed_seconds']):.1f}s  |  "
-            f"sbox_loops={result['sandbox_loop_count']}  "
-            f"compliance_loops={result['compliance_loop_count']}  "
-            f"files={result['files_generated']}"
-        )
+                f"\n  [{qid:<20}] {verdict} in {result['elapsed_seconds']}s  |  "
+                f"queue={result.get('queue_wait_seconds', 0.0):.1f}s  "
+                f"process={result.get('processing_seconds', result['elapsed_seconds']):.1f}s  |  "
+                f"sbox={result['sandbox_loop_count']}  "
+                f"comp={result['compliance_loop_count']}  "
+                f"files={result['files_generated']}"
+            )
             return result
 
         time.sleep(POLL_INTERVAL)
 
-    cancel_task(task_id)
-    result = _build_result(run_id, question, task_id, start_time, start_iso, "timeout", last_data,
-                            error=f"Timed out after {per_q_timeout}s")
-    print(f"\n  TIMEOUT after {result['elapsed_seconds']}s — cancelled "
-          f"(per-question limit={per_q_timeout}s, "
-          f"last node={last_data.get('current_node')} "
-          f"sandbox_loops={last_data.get('sandbox_loop_count', 0)})")
-    return result
+
+# ---------------------------------------------------------------------------
+# Sequential execution
+# ---------------------------------------------------------------------------
+
+def run_questions_sequential(questions: list[dict], run_id: str, per_q_timeout: int) -> list[dict]:
+    print(f"\nBenchmark run (sequential): {run_id}")
+    print(f"  Questions: {len(questions)}")
+    print(f"  API:       {BASE_URL}")
+    print(f"  Per-job cap: {per_q_timeout}s (from worker start)")
+    results = []
+    for q in questions:
+        results.append(_process_one(q, run_id, per_q_timeout, label_lines_prefix=True))
+    return results
 
 
 # ---------------------------------------------------------------------------
-# Concurrent execution
+# Slot-based concurrent execution
 # ---------------------------------------------------------------------------
-
-def _submit_all(questions: list[dict], batch_size: int) -> list[tuple[dict, str | None, str | None, float, str]]:
-    """Submit questions in batches and return (question, task_id, error, start_time, start_iso)."""
-    submitted = []
-    print(f"  Submitting {len(questions)} questions in batches of {batch_size}...")
-
-    for i in range(0, len(questions), batch_size):
-        batch = questions[i:i + batch_size]
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = {
-                executor.submit(submit_task, q["prompt"]): q
-                for q in batch
-            }
-            for future in as_completed(futures):
-                q = futures[future]
-                start_time = time.time()
-                start_iso = datetime.now(timezone.utc).isoformat()
-                try:
-                    task_id = future.result()
-                    submitted.append((q, task_id, None, start_time, start_iso))
-                    print(f"    [{q['id']}] submitted {task_id}")
-                except Exception as e:
-                    submitted.append((q, None, str(e), start_time, start_iso))
-                    print(f"    [{q['id']}] SUBMIT ERROR: {e}")
-
-    return submitted
-
 
 def run_questions_concurrent(
     questions: list[dict],
     run_id: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    total_timeout: int = TOTAL_TIMEOUT,
-    total_timeout_action: str = TOTAL_TIMEOUT_ACTION,
+    per_q_timeout: int = PER_Q_TIMEOUT,
 ) -> list[dict]:
-    """Submit all questions concurrently (in batches), then poll until all settle."""
+    """Run questions slot-based: at most `batch_size` jobs in flight at once.
+
+    Each worker thread loops: submit -> poll -> record -> pick up the next
+    question. This bounds queue wait to near zero (a job is only submitted when
+    a worker slot is free), so the per-job timeout measures real pipeline work,
+    not queue time. There is no whole-run kill switch -- each job has its own
+    deadline computed from `started_at`.
+    """
     run_start = time.time()
-    print(f"\nConcurrent benchmark run: {run_id}")
-    print(f"  Questions: {len(questions)}")
-    print(f"  API:       {BASE_URL}")
-    print(f"  Batch:     {batch_size}")
-    print(f"  Total cap: {total_timeout}s  (action={total_timeout_action})")
+    print(f"\nBenchmark run: {run_id}")
+    print(f"  Questions:    {len(questions)}")
+    print(f"  API:          {BASE_URL}")
+    print(f"  Concurrency:  {batch_size} (slot-based)")
+    print(f"  Per-job cap:  {per_q_timeout}s (from worker start)")
 
-    pending = _submit_all(questions, batch_size)
-    results_map: dict[str, dict] = {}
-    live_nodes: dict[str, str | None] = {q["id"]: None for q in questions}
-    locks = {q["id"]: threading.Lock() for q in questions}
-    total_timeout_hit = threading.Event()
+    # Each worker pops the next question off a shared iterator.
+    question_iter = iter(questions)
+    counter_lock = threading.Lock()
+    results: list[dict] = []
+    results_lock = threading.Lock()
+    done_count = [0]
 
-    def poll_loop(question: dict, task_id: str | None, submit_error: str | None, q_start: float, q_start_iso: str):
-        qid = question["id"]
-        if submit_error:
-            results_map[qid] = _build_result(run_id, question, None, q_start, q_start_iso,
-                                              "submit_error", error=submit_error)
-            return
+    def worker_loop():
+        while True:
+            with counter_lock:
+                try:
+                    question = next(question_iter)
+                except StopIteration:
+                    return
+            result = _process_one(question, run_id, per_q_timeout, label_lines_prefix=False)
+            with results_lock:
+                results.append(result)
+                done_count[0] += 1
+                idx = done_count[0]
+            print(f"  ---- [{idx}/{len(questions)}] done ----")
 
-        per_q_timeout = question.get("timeout_seconds", TIMEOUT)
-        deadline = q_start + per_q_timeout
-        last_data = {}
-        cancel_grace_deadline: float | None = None
+    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        futures = [executor.submit(worker_loop) for _ in range(batch_size)]
+        for f in futures:
+            f.result()
 
-        while time.time() < deadline:
-            # Total-run budget check.
-            elapsed_run = time.time() - run_start
-            if elapsed_run >= total_timeout:
-                if not total_timeout_hit.is_set():
-                    total_timeout_hit.set()
-                    if total_timeout_action == "cancel":
-                        cancel_task(task_id)
-                        cancel_grace_deadline = time.time() + 60
-                        print(f"\n  TOTAL RUN TIMEOUT ({total_timeout}s) — cancelling [{qid}], waiting 60s grace")
-                    else:
-                        print(f"\n  TOTAL RUN TIMEOUT ({total_timeout}s) — letting in-progress jobs finish")
+    print(f"\n  Total wall-clock time: {time.time() - run_start:.1f}s")
 
-                if total_timeout_action == "cancel":
-                    if cancel_grace_deadline is not None and time.time() > cancel_grace_deadline:
-                        print(f"  [{qid:<20}] FORCE total_timeout after grace period")
-                        result = _build_result(run_id, question, task_id, q_start, q_start_iso, "total_timeout", last_data,
-                                                error=f"Total run timeout ({total_timeout}s) exceeded; cancellation grace period elapsed")
-                        results_map[qid] = result
-                        return
-
-            try:
-                data = poll_task(task_id)
-                last_data = data
-            except Exception as e:
-                with locks[qid]:
-                    live_nodes[qid] = f"poll_error ({e})"
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            status = data.get("status")
-            node = data.get("current_node")
-
-            with locks[qid]:
-                if node != live_nodes[qid]:
-                    live_nodes[qid] = node
-                    print(f"  [{qid:<20}] {time.time() - q_start:>7.1f}s → {node}  "
-                          f"(sbox={data.get('sandbox_loop_count', 0)} comp={data.get('compliance_loop_count', 0)})")
-
-            if status in ("completed", "failed", "cancelled", "exhausted", "total_timeout"):
-                result = _build_result(run_id, question, task_id, q_start, q_start_iso, status, data)
-                verdict = "PASS" if status == "completed" and result["files_generated"] else "FAIL"
-                print(f"  [{qid:<20}] {verdict} in {result['elapsed_seconds']}s  |  "
-                      f"sbox={result['sandbox_loop_count']} comp={result['compliance_loop_count']} files={result['files_generated']}")
-                results_map[qid] = result
-                return
-
-            time.sleep(POLL_INTERVAL)
-
-        cancel_task(task_id)
-        result = _build_result(run_id, question, task_id, q_start, q_start_iso, "timeout", last_data,
-                                error=f"Timed out after {per_q_timeout}s")
-        print(f"  [{qid:<20}] TIMEOUT after {result['elapsed_seconds']}s")
-        results_map[qid] = result
-
-    with ThreadPoolExecutor(max_workers=len(questions)) as executor:
-        futures = [
-            executor.submit(poll_loop, q, tid, err, qs, qiso)
-            for q, tid, err, qs, qiso in pending
-        ]
-        for future in as_completed(futures):
-            future.result()
-
-    total_elapsed = round(time.time() - run_start, 1)
-    print(f"\n  Total wall-clock time: {total_elapsed}s")
-    if total_timeout_hit.is_set():
-        print(f"  WARNING: total run timeout ({total_timeout}s) fired during this run")
-    return [results_map[q["id"]] for q in questions]
+    # Preserve question order for the summary/diagnostics.
+    results_by_id = {r["question_id"]: r for r in results}
+    return [results_by_id[q["id"]] for q in questions if q["id"] in results_by_id]
 
 
 # ---------------------------------------------------------------------------
@@ -623,13 +590,14 @@ def print_historical_summary():
 # ---------------------------------------------------------------------------
 
 def main():
-    global BASE_URL, TIMEOUT, TOTAL_TIMEOUT, TOTAL_TIMEOUT_ACTION
-    parser = argparse.ArgumentParser(description="Coding Module benchmark runner")
+    global BASE_URL, PER_Q_TIMEOUT
+    parser = argparse.ArgumentParser(description="Coding Module benchmark runner (Tier 2)")
     parser.add_argument("--ids", nargs="+", help="Run only these question IDs")
     parser.add_argument("--summary", action="store_true", help="Print history of past runs and exit")
     parser.add_argument("--url", default=None, help="Override API base URL")
-    parser.add_argument("--timeout", type=int, default=None,
-                        help=f"Per-task timeout in seconds (default {TIMEOUT})")
+    parser.add_argument("--per-q-timeout", type=int, default=None,
+                        help=f"Per-job timeout in seconds, measured from worker "
+                             f"start (default {PER_Q_TIMEOUT})")
     parser.add_argument("--label", default="",
                         help="Short tag stored on every result row")
     parser.add_argument("--diagnostics", action="store_true",
@@ -638,24 +606,13 @@ def main():
                         help="Run questions one at a time instead of concurrently")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                         help=f"Maximum jobs submitted in one batch (default {DEFAULT_BATCH_SIZE})")
-    parser.add_argument("--total-timeout", type=int, default=None,
-                        help=f"Total run timeout in seconds (default {TOTAL_TIMEOUT})")
-    parser.add_argument("--total-timeout-action", choices=["cancel", "finish_in_progress"],
-                        default=None,
-                        help=f"Action when total timeout fires (default {TOTAL_TIMEOUT_ACTION})")
     args = parser.parse_args()
 
     if args.url:
         BASE_URL = args.url
 
-    if args.timeout:
-        TIMEOUT = args.timeout
-
-    if args.total_timeout is not None:
-        TOTAL_TIMEOUT = args.total_timeout
-
-    if args.total_timeout_action is not None:
-        TOTAL_TIMEOUT_ACTION = args.total_timeout_action
+    if args.per_q_timeout is not None:
+        PER_Q_TIMEOUT = args.per_q_timeout
 
     if args.summary:
         print_historical_summary()
@@ -667,23 +624,14 @@ def main():
         sys.exit(1)
 
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_start = time.time()
 
     if args.sequential:
-        print(f"\nBenchmark run: {run_id}")
-        print(f"Questions:     {len(questions)}")
-        print(f"API:           {BASE_URL}")
-        print("Mode:          sequential")
-        print(f"Total cap:     {TOTAL_TIMEOUT}s  (action={TOTAL_TIMEOUT_ACTION})")
-        if args.label:
-            print(f"Label:         {args.label}")
-        results = [run_question_sequential(q, run_id, run_start, TOTAL_TIMEOUT, TOTAL_TIMEOUT_ACTION) for q in questions]
+        results = run_questions_sequential(questions, run_id, PER_Q_TIMEOUT)
     else:
         results = run_questions_concurrent(
             questions, run_id,
             batch_size=args.batch_size,
-            total_timeout=TOTAL_TIMEOUT,
-            total_timeout_action=TOTAL_TIMEOUT_ACTION,
+            per_q_timeout=PER_Q_TIMEOUT,
         )
 
     for r in results:

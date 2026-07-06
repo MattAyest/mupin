@@ -122,7 +122,16 @@ prompts:
 
     <goal>
     Write tests that:
-    1. Cover every explicit functional requirement in the user prompt with at least one test.
+    1. Cover every explicit functional requirement in the user prompt with at least
+       one test that constrains the BEHAVIORAL PROPERTIES of the output — not just
+       type or shape, but the actual values, bounds, monotonicity, membership, or
+       input-output relationships the requirement implies. Type-only checks
+       (isinstance, len, dtype) are necessary but never sufficient on their own.
+       Where you can compute an exact expected value reliably (simple arithmetic,
+       known sequences), assert it. For complex transformations where exact values
+       are hard to compute, assert behavioral properties: bounds (all elements >= X),
+       monotonicity (result is sorted), membership (key in result), sign, or
+       input-output relationships (f(x+y) == f(x) + f(y)).
     2. Exercise invariants and randomized domains using Hypothesis @given where appropriate.
     3. Use pytest.raises for raise-rule cases.
     4. Output only __TEST_MAIN__ and __TEST_INIT__.
@@ -134,8 +143,19 @@ prompts:
     - Import the implementation from __IMPORT_PATH__.
     - Write assertions directly: assert x == y, not assert (x) == (y).
     - Use black-box property tests only. Do not monkeypatch, mock, or subclass
-      built-in types or methods to enforce implementation details. These techniques
-      are brittle and break on modern Python runtimes.
+      built-in types or methods (str, int, list, dict) to enforce implementation
+      details. These techniques are brittle and break on modern Python runtimes.
+    - You MAY use unittest.mock.patch to mock external I/O calls (requests.get,
+      urllib.request.urlopen, open, subprocess.run) so tests can verify
+      processing logic without real network or filesystem access. When mocking
+      a module-level function, patch it at its import site (e.g.
+      @patch("requests.get") for `import requests; requests.get(...)`, or
+      @patch("urllib.request.urlopen") for `import urllib.request; ...`).
+      Never mock the function under test itself.
+    - For tasks that fetch data from a URL or read from a file path, write
+      tests that mock the fetch/read and supply synthetic response data (e.g.
+      a MagicMock with `.text` or `.content` set, or a temp file with known
+      contents). Do not make real network calls in tests.
     - Do not use pytest fixtures inside @given tests; the property runner does not
       reset function-scoped fixtures between examples.
     - For expression evaluators, calculators, parsers, or similar tasks, generate raw
@@ -207,6 +227,38 @@ prompts:
     </file>
     <file name="__TEST_INIT__"></file>
     </example>
+
+    <example>
+    User prompt: Write a Python function fetch_table(url: str, table_id: str) -> pd.DataFrame that fetches an HTML page from a URL and returns the first table with the given id as a DataFrame.
+    Output:
+    <file name="__TEST_MAIN__">
+    from unittest.mock import patch, MagicMock
+    import pandas as pd
+    import pytest
+    from __IMPORT_PATH__ import task_func
+
+    @patch("requests.get")
+    def test_fetch_table_returns_dataframe(mock_get):
+        mock_html = "&lt;html&gt;&lt;table id='t1'&gt;&lt;tr&gt;&lt;th&gt;A&lt;/th&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;1&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;&lt;/html&gt;"
+        mock_resp = MagicMock()
+        mock_resp.text = mock_html
+        mock_get.return_value = mock_resp
+        df = task_func("http://example.com", "t1")
+        assert isinstance(df, pd.DataFrame)
+        assert "A" in df.columns
+        assert len(df) == 1
+        assert df.iloc[0]["A"] == "1"  # behavioral: actual cell value, not just shape
+
+    @patch("requests.get")
+    def test_fetch_table_not_found(mock_get):
+        mock_resp = MagicMock()
+        mock_resp.text = "&lt;html&gt;&lt;/html&gt;"
+        mock_get.return_value = mock_resp
+        with pytest.raises(ValueError):
+            task_func("http://example.com", "nonexistent")
+    </file>
+    <file name="__TEST_INIT__"></file>
+    </example>
     </examples>
 
     <output_format>
@@ -219,7 +271,13 @@ prompts:
     <quality_check>
     Before finishing, verify that:
     - Every explicit requirement in the user prompt has a corresponding test.
-    - No test monkeypatches, mocks, or subclasses built-in types or methods.
+    - Every test for an explicit requirement verifies a behavioral property (value,
+      bound, monotonicity, membership, or input-output relationship), not just
+      type/shape. If any test only checks isinstance/len/dtype, add a behavioral
+      assertion or remove the test.
+    - No test mocks or subclasses built-in types (str, int, list, dict) or the
+      function under test itself. Mocking external I/O (requests, urllib, open,
+      subprocess) via unittest.mock.patch is allowed and encouraged for I/O tasks.
     - No test uses pytest fixtures inside @given.
     - All assertions are written without unnecessary parentheses.
     - Hypothesis strategies use only current API arguments (do not mix deprecated
@@ -318,6 +376,13 @@ prompts:
     - Prefer clean, readable Python over clever one-liners.
     - If third-party dependencies are needed, include them as <file name="__DEPS_FILE__">;
       otherwise omit this file.
+    - When calling external libraries (requests, urllib, open, subprocess), use the
+      `import module` style (e.g. `import requests; requests.get(...)`) NOT
+      `from module import function` (e.g. `from requests import get; get(...)`),
+      so your calls are patchable by tests using @patch("module.function").
+    - Do not call response methods like `.raise_for_status()` or `.json()` unless the
+      prompt explicitly requires them. Tests may supply a Mock response with only
+      `.text` or `.content` set; calling unmocked methods breaks the test harness.
     </rules>
 
     <example>
