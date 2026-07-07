@@ -44,7 +44,7 @@ services:
       context: ./mupin-coding-module
     container_name: mupin_coding_worker
     restart: always
-    command: ["python", "-m", "src.worker"]
+    command: ["bash", "/app/scripts/worker-entrypoint.sh"]
     env_file:
       - ./mupin-coding-module/.env
     environment:
@@ -65,6 +65,14 @@ services:
       - ./mupin-coding-module/profiles:/app/profiles:ro
       # Benchmark runners + results (rw so runners can append jsonl)
       - ./mupin-coding-module/benchmarks:/app/benchmarks:rw
+      # Host resolv.conf mounted to a side path (NOT /etc/resolv.conf) so the
+      # Docker embedded resolver (127.0.0.11) still owns service-name
+      # resolution. The worker entrypoint reads the nameservers from this
+      # file and appends them to the container's /etc/resolv.conf, giving the
+      # embedded resolver working upstreams without hardcoding any IP. See
+      # scripts/worker-entrypoint.sh. Fully portable: uses whatever the host
+      # uses, including networks that block public DNS.
+      - /etc/resolv.conf:/host-resolv.conf:ro
     depends_on:
       - redis
       - postgres

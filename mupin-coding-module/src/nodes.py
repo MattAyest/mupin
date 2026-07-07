@@ -831,6 +831,7 @@ def test_designer(state: AgenticState):
     contract_critique = state.get("contract_critique", [])
     sandbox_errors = state.get("sandbox_errors", "")
     contract_loop = state.get("contract_loop_count", 0)
+    contract_code = state.get("contract_code") or ""
 
     profile = _profile_from_state(state)
     setup_workspace(workspace, profile)
@@ -847,6 +848,17 @@ def test_designer(state: AgenticState):
         "hand-write AST renderers or string-composition logic that must preserve "
         "operator precedence; let the language parser be the source of truth."
     )
+
+    if contract_code:
+        user_prompt += (
+            "\n\nContract code (authoritative signature and module-level imports "
+            "extracted from the prompt; your tests MUST call task_func with these "
+            "exact parameter names and defaults and rely on these import scopes. "
+            "The contract defines how to CALL the function, NOT what to ASSERT about "
+            "the result — behavioral-property assertions remain mandatory regardless "
+            "of the contract's type hints):\n"
+            f"```python\n{contract_code}\n```"
+        )
 
     prior_tests = manifest.get(test_main_path, "")
     if prior_tests:
@@ -937,6 +949,7 @@ def skeleton_maker(state: AgenticState):
     workspace = state.get("workspace_dir", "")
     manifest = state.get("file_manifest", {})
     contract_loop = state.get("contract_loop_count", 0)
+    contract_code = state.get("contract_code") or ""
 
     profile = _profile_from_state(state)
     setup_workspace(workspace, profile)
@@ -956,7 +969,19 @@ def skeleton_maker(state: AgenticState):
 
     system = profile.prompt("skeleton_maker_system")
 
-    user_prompt = f"User prompt:\n{prompt}\n\nTests/{test_main_path}:\n{test_code}"
+    user_prompt = f"User prompt:\n{prompt}"
+    if contract_code:
+        user_prompt += (
+            "\n\nContract code (use VERBATIM — keep these module-level imports at the "
+            "top of __SOURCE_MAIN__ and adopt the exact function signature, parameter "
+            "names, defaults, and return annotation; only replace the body with pass "
+            "or raise NotImplementedError. Append `  # noqa: F401` to any contract "
+            "import that the function body will not reference, so linters do not strip "
+            "it. The contract is the floor; also stub any additional symbols the tests "
+            "require that the contract does not define):\n"
+            f"```python\n{contract_code}\n```"
+        )
+    user_prompt += f"\n\nTests/{test_main_path}:\n{test_code}"
 
     try:
         content, llm_usage = _invoke_with_retry(

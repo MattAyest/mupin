@@ -135,6 +135,44 @@ The sandbox can leave exited containers and build cache behind. Run the prune sc
 
 This removes exited containers (except persistent services), dangling build cache, and unused images older than 24h.
 
+### Troubleshooting
+
+#### All jobs fail with `infra_exhausted` and empty `node_history`
+
+If every benchmark job fails in a few seconds with `status=infra_exhausted`, `error="LLM infrastructure retries exhausted"`, and `node_history` is empty, the pipeline never got past its first LLM call. This is almost always **DNS resolution failing inside the worker container**, not an LLM/API problem — the worker cannot reach `ollama.com`.
+
+Verify:
+
+```bash
+docker exec mupin_coding_worker python3 -c "import socket; print(socket.gethostbyname('ollama.com'))"
+# Healthy: prints an IP like 34.36.133.15
+# Broken: socket.gaierror: [Errno -3] Temporary failure in name resolution
+```
+
+**Root cause:** the Docker daemon reads `/etc/resolv.conf` once at boot to seed its embedded DNS resolver (`127.0.0.11`) with upstream nameservers. On hosts where a DHCP client (dhcpcd, NetworkManager, systemd-resolved) writes `/etc/resolv.conf` asynchronously, the daemon can boot during an empty/in-flux window and capture zero upstream nameservers. Every container created afterward inherits "NO EXTERNAL NAMESERVERS DEFINED" until the daemon is restarted at a lucky moment.
+
+This stack **mounts the host's `/etc/resolv.conf` read-only** into each outbound service (`mupin-coding-worker`, `mupin-coding-api`, `mupin-api-backbone`) in `docker-compose.yml`. This bypasses the daemon's broken embedded-resolver snapshot entirely: the container reads the host's live nameservers directly, so it works on any host with working host DNS — no hardcoded resolver IPs, works on networks that block public DNS, no daemon-restart dance. The worker also runs a DNS self-check at startup (`scripts/worker-entrypoint.sh`) and refuses to start if resolution fails, so instead of silently burning every job it logs a clear `DNS_RESOLUTION_FAILED` message and `restart: always` recreates the container.
+
+**If DNS is still broken** (the host itself has no working resolver, or the mount is disallowed on your platform), provide a `docker-compose.override.yml` with explicit `dns:` pointing at a reachable resolver:
+
+```yaml
+services:
+  mupin-coding-worker:
+    dns:
+      - 10.0.0.53      # your internal resolver
+    volumes: !reset []  # drop the host-resolv.conf mount if it conflicts
+  mupin-coding-api:
+    dns:
+      - 10.0.0.53
+    volumes: !reset []
+  mupin-api-backbone:
+    dns:
+      - 10.0.0.53
+    volumes: !reset []
+```
+
+Then `docker compose up -d --force-recreate`. The worker will only begin consuming jobs once the entrypoint self-check passes.
+
 ### Status values
 
 - `running` — active.

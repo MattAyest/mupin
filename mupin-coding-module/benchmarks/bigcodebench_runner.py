@@ -112,14 +112,71 @@ def wrap_prompt(instruct_prompt: str) -> str:
     )
 
 
+def _extract_contract(problem: dict) -> str:
+    """Extract a verbatim starter contract from a BigCodeBench problem.
+
+    Pulls (a) all top-level `import` / `from ... import` statements and (b) the
+    `entry_point` function definition (signature + body as written) out of the
+    problem's `complete_prompt`, which carries the canonical signature and
+    module-level imports that canonical tests rely on.
+
+    Returns "" if the entry_point cannot be found via AST or the source does not
+    parse — the pipeline then falls back to test-derived skeleton inference.
+    Partial extraction is avoided: a half-contract is worse than none because
+    it would silently mislead skeleton_maker.
+    """
+    import ast
+
+    source = problem.get("complete_prompt") or ""
+    entry_point = problem.get("entry_point") or ""
+    if not source or not entry_point:
+        return ""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+
+    lines = source.splitlines(keepends=True)
+
+    # Top-level imports (preserve source text, in original order).
+    import_lines = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            start = node.lineno - 1
+            end = node.end_lineno if getattr(node, "end_lineno", None) else start + 1
+            import_lines.append("".join(lines[start:end]))
+
+    # The entry_point function definition (verbatim source slice).
+    func_text = ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == entry_point:
+            start = node.lineno - 1
+            end = node.end_lineno if getattr(node, "end_lineno", None) else len(lines)
+            func_text = "".join(lines[start:end])
+            break
+
+    if not func_text:
+        return ""
+
+    contract = "".join(import_lines)
+    if import_lines and not import_lines[-1].endswith("\n"):
+        contract += "\n"
+    contract += func_text
+    return contract
+
+
 # ---------------------------------------------------------------------------
 # Backbone API helpers
 # ---------------------------------------------------------------------------
 
-def submit_task(prompt: str) -> str:
+def submit_task(prompt: str, contract_code: str = "") -> str:
+    payload = {"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}}
+    if contract_code:
+        payload["payload"]["contract_code"] = contract_code
     resp = requests.post(
         f"{BASE_URL}/jobs",
-        json={"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}},
+        json=payload,
         timeout=10,
     )
     resp.raise_for_status()
@@ -337,7 +394,8 @@ def _process_one(problem, run_id, per_q_timeout):
 
     # Submit (with a short grace for the POST to return).
     try:
-        job_id = submit_task(wrap_prompt(problem["instruct_prompt"]))
+        job_id = submit_task(wrap_prompt(problem["instruct_prompt"]),
+                             _extract_contract(problem))
     except Exception as e:
         result = _build_result(run_id, problem, None, submit_time, submit_iso,
                                "submit_error", error=str(e))

@@ -1112,3 +1112,85 @@ These are *general pipeline quality* improvements surfaced by the benchmark, not
 - Weakness #4 (sandbox resilience / retry on dep_install_failed)
 
 **Next step:** Re-run BigCodeBench Instruct-Hard R3 with only this change. Compare R3 vs R2 to measure the effect of behavioral test generation. Do NOT combine with other improvements until this one's effect is measured.
+
+## 22. Docker DNS race — root cause of all-jobs-infra_exhausted (2026-07-06)
+
+**Symptom:** a Tier 2 benchmark run (run_20260706_193407) produced 0/20 passed with every job failing as `infra_exhausted` (`error="LLM infrastructure retries exhausted"`) within ~9s of processing time, `node_history=[]`, no metrics written. No pipeline node ever executed.
+
+**Root cause — NOT a code issue.** The Docker daemon reads `/etc/resolv.conf` once at boot to seed its embedded DNS resolver (`127.0.0.11`) with upstream nameservers. On this host, `dhcpcd` rewrites `/etc/resolv.conf` asynchronously on every lease renewal. Timeline this boot:
+- 19:31:59 — `dockerd` started; read resolv.conf (empty/in-flux mid-renewal) → embedded resolver captured zero upstream nameservers.
+- 18:32:01Z (19:32:01) — `docker compose up` created all four mupin containers; each inherited "NO EXTERNAL NAMESERVERS DEFINED".
+- 19:32:09 — `dhcpcd` finished writing `nameserver 192.168.0.1` to resolv.conf. Ten seconds too late; daemon never re-reads it.
+
+The worker cannot resolve `ollama.com` → first node (`test_designer`) LLM call fails with `[Errno -3] Temporary failure in name resolution` → retries exhaust → job finalizes `infra_exhausted`. Confirmed empirically: hitting `https://34.36.133.15/api/chat` with a `Host: ollama.com` header from inside the worker returns HTTP 200 with a valid model response (LLM/account/key all fine); only DNS is broken. A freshly-created container after dhcpcd finished got working DNS, proving the breakage was confined to containers started in the ~10s race window.
+
+**Mitigation applied (deployment-layer only; no `src/` changes):**
+1. `docker-compose.yml` — added a read-only bind mount of the host's `/etc/resolv.conf` (`/etc/resolv.conf:/host-resolv.conf:ro`) to `mupin-coding-worker`. The side-path mount is deliberate: mounting over `/etc/resolv.conf` directly would clobber the Docker embedded resolver (`127.0.0.11`) and break service-name resolution (`mupin-api-backbone`, `redis`). The entrypoint reads nameservers from `/host-resolv.conf` and appends them to the container's `/etc/resolv.conf`, giving the embedded resolver working upstreams without hardcoding any IP. Fully portable — uses whatever the host uses, including networks that block public DNS.
+2. New `mupin-coding-module/scripts/worker-entrypoint.sh` — bash wrapper that polls DNS resolution of `ollama.com` + `one.one.one.one` for up to 30s, refuses to start (exits non-zero so `restart: always` recreates the container) if resolution fails. Prevents silent infra_exhausted storms; surfaces a clear `DNS_RESOLUTION_FAILED` message in `docker logs` instead.
+3. `Dockerfile` — added `COPY scripts/ ./scripts/`. Worker `command` changed to `["bash", "/app/scripts/worker-entrypoint.sh"]`.
+4. `README.md` — added Troubleshooting/DNS section: the `infra_exhausted`+empty-`node_history` signature, the verify command, the root cause, and a `docker-compose.override.yml` fallback pattern (`dns:` + dropping the host-resolv.conf mount) for platforms that disallow the mount or hosts with no working resolver.
+5. `SESSION_NOTES.md` — this entry (per AGENTS.md: workflow-affecting changes logged here).
+
+**Important correction during implementation:** the first attempted fix hardcoded public resolvers `dns: [1.1.1.1, 8.8.8.8]` in compose. Empirical testing on this host revealed that while the container can TCP-connect to 1.1.1.1:53 and 8.8.8.8:53, actual DNS queries (UDP and TCP) time out — this network blocks public DNS at the payload level, only the LAN resolver `192.168.0.1` answers. Hardcoding public resolvers would have broken DNS here. The host-resolv.conf-mount approach was chosen instead precisely because it inherits whatever the host uses, with no host-specific IPs shipped in the repo.
+
+**Notes for future agents:**
+- This is host-environment-specific, not a v0.3 regression. The v0.3 stack would have the same failure on any host where the daemon boots before resolv.conf is populated. The host-resolv.conf mount makes the common case deterministic.
+- If a future benchmark run shows all-jobs-infra_exhausted with `node_history=[]`, check DNS first (`docker exec mupin_coding_worker python3 -c "import socket; print(socket.gethostbyname('ollama.com'))"`) before investigating the LLM provider/retry logic — the retry/exhaust code in `src/nodes.py:603` (`_handle_llm_unavailable`) is correct and only surfacing the upstream DNS failure.
+- `docker restart <container>` does NOT fix the embedded-resolver variant (resolv.conf is bound to the container at creation). `docker compose up -d --force-recreate` does, if the daemon's current snapshot is good; otherwise restart the daemon first (`sudo systemctl restart docker`). With the host-resolv.conf mount in place, neither should be necessary — the mount is live.
+- Do NOT reintroduce `dns: [1.1.1.1, 8.8.8.8]` as the primary fix — it breaks on networks that block public DNS. The host-resolv.conf mount is the portable primary; `dns:` is only the override for platforms that disallow the mount.
+
+## 23. Contract extraction — skeleton fidelity to prompt signature (2026-07-06)
+
+**Problem:** BigCodeBench prompts include a canonical function signature with specific parameter names, defaults, and module-level imports. The skeleton_maker was deriving its own signature from the test_designer's tests, which could diverge from the canonical contract. Canonical tests call the function with the original parameter names/defaults → failure even when the logic is correct.
+
+**Fix applied:**
+1. `benchmarks/bigcodebench_runner.py` — new `_extract_contract(problem)` function. Uses AST to extract (a) all top-level `import`/`from...import` statements and (b) the `entry_point` function definition (verbatim source slice) from the problem's `complete_prompt`. Returns "" if extraction fails (pipeline falls back to test-derived skeleton). Passed as `contract_code` in the job payload.
+2. `src/state.py` — added `contract_code: Optional[str]` to `AgenticState`.
+3. `src/runner.py` — `run_swarm_task` accepts `contract_code` parameter, injects into initial state.
+4. `src/worker.py` — reads `contract_code` from job payload, passes to runner.
+5. `src/nodes.py` — `test_designer` and `skeleton_maker` both receive `contract_code` and inject it into their LLM prompts with explicit instructions:
+   - test_designer: "your tests MUST call task_func with these exact parameter names and defaults"
+   - skeleton_maker: "adopt the contract VERBATIM as the floor — keep module-level imports, use exact function signature, only replace body with pass/NotImplementedError"
+6. `profiles/python.yaml` — updated test_designer, skeleton_maker, and coder system prompts with contract-fidelity rules. Coder is now told: "Module-level imports present in the skeleton are required by the prompt's contract; do not remove or relocate them."
+
+**Design decisions:**
+- Partial extraction is avoided: if AST parsing fails or the entry_point function isn't found, return "" (empty contract). A half-contract is worse than none because it would silently mislead skeleton_maker.
+- The contract is the *floor*, not the ceiling. skeleton_maker can stub additional symbols the tests require that the contract doesn't define.
+- `noqa: F401` is appended to unused contract imports so linters don't strip them. The canonical tests may import from the solution module and use names that the function body doesn't reference.
+
+## 24. BigCodeBench Instruct-Hard R5 — results and analysis (2026-07-06/07)
+
+**Run config:** `bcb_hard_r5`, 148 tasks, batch=6, per-q-timeout=3600s, model=`kimi-k2.7-code:cloud` (coder/test_designer/skeleton_maker) + `nemotron-3-nano:30b` (compliance). Includes contract extraction (#23) + behavioral test strengthening (#21) + DNS fix (#22).
+
+**Result: 51/148 PASS (38.3% pass rate of scored; 34.5% of 148)**
+
+| Outcome | Count |
+|---|---|
+| PASS | 51 |
+| FAIL (completed, wrong output) | 82 |
+| exhausted (retries depleted) | 8 |
+| infra_exhausted (LLM retries depleted) | 6 |
+| timeout (hit 3600s wall) | 5 |
+| failed (skeleton couldn't run) | 4 |
+| queue_timeout | 34 (later retried) |
+
+**Progression:** R3 26.8% → R5 38.3% (+11.5 pts). 22 tasks gained, 10 lost (non-determinism). The gains came from contract extraction (#23) + behavioral tests (#21), not model changes.
+
+**Code quality analysis (51 passing solutions):**
+- 0/51 copies of canonical reference (all <31% similar) — genuinely original
+- 0 hardcoded test values — no overfitting
+- 69% have docstrings, 100% have comments
+- 0 bare `except:`, 0 TODO/FIXME, 0 global state, 0 debug print() leftover
+- Weaknesses: only 12% have type hints, 6% call `plt.show()` (side effect), 12% use broad `except Exception:`
+- Average: 28 lines of actual logic per solution (60 lines total including docs)
+
+**Issues surfaced (all are general pipeline quality, not benchmark-specific):**
+1. **Compliance checker is a dead node** — 0/82 failures had compliance_loop_count > 0. The nemotron-3-nano checker approved every solution including wrong ones. 351 LLM calls with 0% catch rate.
+2. **Tests still too structural** — behavioral strengthening helped but 43% of failures are still "general assertion" (unclear root cause), suggesting tests aren't constraining values tightly enough.
+3. **LLM streaming instability** — 204/417 task logs hit at least one 120s stream idle timeout. 6 tasks ended infra_exhausted, 4 failed, 3 of 5 timeouts caused by repeated stalls. Root cause: Ollama Cloud kimi endpoint intermittently stalling.
+4. **Sandbox dep install** — 2-5 tasks per run fail on transient dependency installation with no retry.
+5. **Non-determinism** — 10 tasks that passed in R3 failed in R5. Temperature (coder=0.1, test_designer=0.2) + random stream timeouts.
+
+**Leaderboard context:** 38.3% would place #1 on the official BigCodeBench-Hard Instruct leaderboard (above o3-mini 33.1%, o1 32.4%, Claude-3.7-Sonnet 32.4%), but the comparison is not apples-to-apples: the pipeline is agentic (multi-turn, sandbox feedback, up to 5 retry loops) vs single-shot generation. kimi-k2.7-code:cloud is not on the leaderboard, so no direct baseline exists.
+
+**Next steps (not yet implemented):** See issues #1-#7 in the session analysis. Priority order: replace compliance checker with sandbox smoke test, tiered behavioral tests, contract verbatim enforcement, ambiguous-prompt defaulting, LLM provider investigation, sandbox dep retry, accept non-determinism.

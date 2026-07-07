@@ -18,6 +18,13 @@ class AgenticState(TypedDict):
     profile_name: str
     python_version: Optional[str]
 
+    # Authoritative starter signature/imports extracted from the prompt by the
+    # benchmark runner. Empty for prompts without a structured contract; in that
+    # case skeleton_maker falls back to test-derived inference. Used to keep the
+    # generated solution's import scope and signature aligned with canonical
+    # tests, which follow the prompt contract rather than the pipeline's tests.
+    contract_code: Optional[str]
+
     # ------------------------------------------------------------------
     # Code artifacts (single-file contract)
     # ------------------------------------------------------------------

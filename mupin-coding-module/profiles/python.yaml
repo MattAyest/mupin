@@ -142,6 +142,12 @@ prompts:
     - Constrain Hypothesis strategies at the source; never use assume().
     - Import the implementation from __IMPORT_PATH__.
     - Write assertions directly: assert x == y, not assert (x) == (y).
+    - If a contract code block is provided with the prompt, it is the authoritative
+      signature and module-level import scope. Your tests MUST call task_func with
+      the contract's exact parameter names, defaults, and import scope. The contract
+      defines how to CALL the function, NOT what to ASSERT — behavioral-property
+      assertions remain mandatory regardless of the contract's type hints; do not
+      downgrade to type-only checks just because the contract shows type hints.
     - Use black-box property tests only. Do not monkeypatch, mock, or subclass
       built-in types or methods (str, int, list, dict) to enforce implementation
       details. These techniques are brittle and break on modern Python runtimes.
@@ -301,19 +307,36 @@ prompts:
     <inputs>
     - The user's natural-language prompt.
     - The generated __TEST_MAIN__ file.
+    - If provided, a contract code block (authoritative signature + module-level
+      imports extracted from the prompt).
     </inputs>
 
     <rules>
     - Match every function/class name and signature called by the tests.
     - Use type hints exactly as implied by the test assertions.
+    - If a contract code block is provided, adopt it VERBATIM as the floor:
+      keep its module-level imports at the top of __SOURCE_MAIN__ unchanged
+      (append `  # noqa: F401` to any contract import the function body will
+      not reference, so ruff --fix does not strip it), and use its exact
+      function signature, parameter names, defaults, and return annotation.
+      Only replace the function body with `pass` or `raise NotImplementedError`.
+      Also stub any additional symbols the tests require that the contract
+      does not define.
     - Function and method bodies must be only pass or raise NotImplementedError.
-    - Do not write any algorithmic logic, helpers, or non-stdlib imports in the skeleton.
+    - Do not write any algorithmic logic, helpers, or non-stdlib imports beyond
+      those in the contract.
     - Output an empty __SOURCE_INIT__.
-    - If tests import from a module other than __IMPORT_PATH__, mark the contract incompatible.
+    - If tests import from a module other than __IMPORT_PATH__, mark the contract
+      incompatible.
+    - If the tests and the contract code disagree (parameter names, defaults,
+      import scope, or return annotation), the contract is authoritative — the
+      canonical tests follow the prompt contract. Mark the contract_verdict
+      incompatible and write a critique naming the specific mismatch so the
+      test_designer aligns its tests to the contract.
     - If tests expect behavior not supported by the prompt, mark the contract
       incompatible and explain.
-    - If the prompt is ambiguous, pick a consistent interpretation, build the skeleton
-      to match it, and note the ambiguity in the critique.
+    - If the prompt is ambiguous, pick a consistent interpretation, build the
+      skeleton to match it, and note the ambiguity in the critique.
     </rules>
 
     <example>
@@ -371,6 +394,9 @@ prompts:
 
     <rules>
     - Only modify function/class bodies. Do not change signatures, imports, or class structure.
+    - Module-level imports present in the skeleton are required by the prompt's
+      contract; do not remove or relocate them, even if they appear unused. Do not
+      add duplicate imports inside function bodies that shadow module-level imports.
     - Do not output or modify __TEST_MAIN__ or any test file.
     - Do not hardcode outputs or special-case inputs to make tests pass.
     - Prefer clean, readable Python over clever one-liners.

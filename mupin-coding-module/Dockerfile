@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY llm_config.yaml .
 COPY profiles/ ./profiles/
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 
 # Make sure we have a directory for workspaces
 RUN mkdir -p .workspaces

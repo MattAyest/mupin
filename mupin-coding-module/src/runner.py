@@ -106,6 +106,7 @@ async def run_swarm_task(
     progress_callback=None,
     is_cancelled=None,
     deadline: float | None = None,
+    contract_code: str = "",
 ) -> Dict[str, Any]:
     """Run the full coding pipeline and return a serializable result payload.
 
@@ -125,6 +126,7 @@ async def run_swarm_task(
         "workspace_dir": workspace_dir,
         "profile_name": profile_name,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "contract_code": contract_code,
         "file_manifest": {},
         "sandbox_errors": "",
         "sandbox_diagnostics": {},
