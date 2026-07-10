@@ -123,14 +123,12 @@ async def internal_progress(job_id: str, progress: JobProgress):
         await update_job_progress(
             session,
             job_id,
-            {
-                "current_node": progress.current_node,
-                "sandbox_loop_count": progress.sandbox_loop_count,
-                "compliance_loop_count": progress.compliance_loop_count,
-                "compliance_status": progress.compliance_status,
-                "thoughts": progress.thoughts,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
+                {
+                    "current_node": progress.current_node,
+                    "sandbox_loop_count": progress.sandbox_loop_count,
+                    "thoughts": progress.thoughts,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
         )
         await session.refresh(job)
         return _job_to_response(job)

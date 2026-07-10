@@ -103,6 +103,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
     prompt = payload.get("prompt", "")
     profile_name = payload.get("profile_name", "python")
     contract_code = payload.get("contract_code", "")
+    deps_cache_tag = payload.get("deps_cache_tag") or None
     workspace_dir = str(WORKSPACE_ROOT / job_id)
 
     progress_count = 0
@@ -115,7 +116,6 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
         # Throttle progress posts to avoid spamming the backbone.
         if progress_count % 3 == 0 or update.get("current_node") in (
             "sandbox_arbiter",
-            "prompt_compliance_checker",
         ):
             await _post_progress(job_id, update)
 
@@ -131,6 +131,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
             progress_callback=progress_callback,
             is_cancelled=cancellation_check,
             contract_code=contract_code,
+            deps_cache_tag=deps_cache_tag,
         )
     except asyncio.CancelledError:
         await _finalize(job_id, {"status": "cancelled", "error": "Worker job cancelled"})
@@ -139,8 +140,6 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
     await _post_progress(job_id, {
         "current_node": result.get("current_node", "FINISH"),
         "sandbox_loop_count": result.get("sandbox_loop_count", 0),
-        "compliance_loop_count": result.get("compliance_loop_count", 0),
-        "compliance_status": result.get("compliance_status"),
         "thoughts": result.get("thoughts", [])[-20:],
     })
     await _finalize(job_id, result)

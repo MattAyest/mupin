@@ -10,19 +10,31 @@ Usage:
     python benchmarks/bigcodebench_runner.py                       # full 148-task run
     python benchmarks/bigcodebench_runner.py --limit 10             # first 10 problems (smoke test)
     python benchmarks/bigcodebench_runner.py --ids BigCodeBench/100 BigCodeBench/101
-    python benchmarks/bigcodebench_runner.py --batch-size 6        # concurrency (default 6)
+    python benchmarks/bigcodebench_runner.py --batch-size 6        # submit/poll concurrency (default 6)
+    python benchmarks/bigcodebench_runner.py --scorer-concurrency 3  # scoring container concurrency (default 3)
     python benchmarks/bigcodebench_runner.py --per-q-timeout 3600  # per-job cap (default 3600s)
     python benchmarks/bigcodebench_runner.py --summary             # print pass@1 from last run
     python benchmarks/bigcodebench_runner.py --rescore             # re-score existing completed jobs in place
+    python benchmarks/bigcodebench_runner.py --keep-workspaces    # retain task workspaces after scoring (debug)
 
 Results are appended to benchmarks/bigcodebench_results.jsonl - one JSON line per
 problem.  pass@1 = passing / total.
 
-Execution model: slot-based. At most `--batch-size` jobs are in flight at once;
-each worker thread loops submit -> poll -> score -> next problem. Queue wait is
+Execution model: slot-based. At most `--batch-size` jobs are submitted and
+polled in parallel; each worker thread loops submit -> poll -> score -> next
+problem. The heavy BigCodeBench scoring containers are gated independently by
+`--scorer-concurrency` so the host is not overloaded by concurrent runs of the
+~25 GB `bigcodebench/bigcodebench-evaluate:latest` image. Queue wait is
 therefore near zero, and the per-job timeout (--per-q-timeout) measures real
 pipeline work, measured from the worker's `started_at` timestamp -- NOT from
 submission time. There is no whole-run kill switch.
+
+To prevent the Proxmox guest VM from slowly accumulating page cache and freezing,
+the runner also:
+  - drops Linux page caches after each scoring task via a tiny privileged helper
+    container (`docker run --rm --privileged --pid=host alpine sh -c "echo 3 > /proc/sys/vm/drop_caches"`)
+  - deletes each task workspace after its result is recorded (use --keep-workspaces to retain)
+  - runs `docker container prune -f` every 20 tasks to clear leftover metadata
 
 The runner is designed to execute INSIDE the mupin_coding_worker container,
 where the `bigcodebench` package and the backbone URL
@@ -35,6 +47,7 @@ Requires: pip install bigcodebench requests  (already in the worker image)
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +55,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -67,6 +81,22 @@ DEFAULT_BATCH_SIZE = 6      # matches WORKER_MAX_JOBS
 # tensorflow, tesseract, etc.).
 SCORE_IMAGE = "bigcodebench/bigcodebench-evaluate:latest"
 SCORE_TIMEOUT = 240          # seconds for the canonical test run (official default)
+
+# The official BigCodeBench scoring image is ~25 GB on disk. Re-reading its
+# heavy layers (tensorflow, librosa, opencv, etc.) from many containers at once
+# can saturate the host disk bus, so scoring concurrency is gated independently
+# of the pipeline submit/poll concurrency.
+DEFAULT_SCORER_CONCURRENCY = 3
+_SCORER_SEM: Optional[threading.Semaphore] = None
+
+# Workspace cleanup. By default completed/failed task workspaces are deleted
+# after scoring so the .workspaces/ dir does not grow without bound across
+# many benchmark runs. Use --keep-workspaces to retain them for debugging.
+_KEEP_WORKSPACES: bool = False
+
+# Run docker container prune every N completed tasks to clear any leftover
+# metadata from --rm scoring containers that the daemon may retain briefly.
+_DOCKER_PRUNE_INTERVAL = 20
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +200,20 @@ def _extract_contract(problem: dict) -> str:
 # Backbone API helpers
 # ---------------------------------------------------------------------------
 
+_global_deps_cache_tag: str | None = None
+
+
+def set_deps_cache_tag(tag: str | None) -> None:
+    global _global_deps_cache_tag
+    _global_deps_cache_tag = tag
+
+
 def submit_task(prompt: str, contract_code: str = "") -> str:
     payload = {"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}}
     if contract_code:
         payload["payload"]["contract_code"] = contract_code
+    if _global_deps_cache_tag:
+        payload["payload"]["deps_cache_tag"] = _global_deps_cache_tag
     resp = requests.post(
         f"{BASE_URL}/jobs",
         json=payload,
@@ -191,7 +231,6 @@ def poll_task(task_id: str):
     normalized = dict(data)
     normalized.setdefault("current_node", progress.get("current_node", data.get("status")))
     normalized.setdefault("sandbox_loop_count", progress.get("sandbox_loop_count", 0))
-    normalized.setdefault("compliance_loop_count", progress.get("compliance_loop_count", 0))
     return normalized
 
 
@@ -205,6 +244,66 @@ def cancel_task(task_id: str):
 # ---------------------------------------------------------------------------
 # Scoring against canonical BigCodeBench tests
 # ---------------------------------------------------------------------------
+
+def _drop_caches() -> None:
+    """Drop Linux page cache after a scoring container exits.
+
+    Each fresh `docker run --rm` scoring container re-reads the ~25 GB
+    BigCodeBench evaluate image layers into the guest's page cache. On the
+    emulated virtio-scsi disk the kernel reclaims these pages sluggishly, so
+    over 148 tasks the cache grows monotonically until the guest VM wedges.
+
+    The runner executes inside the mupin_coding_worker container, where
+    /proc/sys/vm/drop_caches is read-only. The worker has the host Docker
+    socket mounted, so we drop the *host* (guest VM) page cache by running a
+    tiny privileged container in the host PID namespace.
+    """
+    try:
+        subprocess.run(
+            [
+                "docker", "run", "--rm", "--privileged", "--pid=host",
+                "alpine", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches",
+            ],
+            timeout=30,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+
+
+def _docker_prune() -> None:
+    """Remove exited container metadata that the daemon may retain.
+
+    Called periodically during a long benchmark run so `docker run --rm`
+    bookkeeping does not accumulate.
+    """
+    try:
+        subprocess.run(
+            ["docker", "container", "prune", "-f", "--filter", "status=exited"],
+            timeout=30,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+
+
+def _cleanup_workspace(job_id: str) -> None:
+    """Delete a task workspace after scoring so .workspaces/ does not grow.
+
+    Workspaces are kept by default during a run for inspection; the runner now
+    takes responsibility for removing them once results are recorded. The
+    `--keep-workspaces` flag disables this.
+    """
+    if _KEEP_WORKSPACES:
+        return
+    if not job_id:
+        return
+    ws = WORKSPACE_ROOT / job_id
+    try:
+        shutil.rmtree(ws, ignore_errors=True)
+    except Exception:
+        pass
+
 
 def _extract_function(source: str, entry_point: str) -> str:
     """Extract the source lines defining entry_point from a module.
@@ -359,7 +458,6 @@ def _build_result(run_id, problem, job_id, start_time, start_iso, status, data=N
         "queue_wait_seconds": queue_wait,
         "status": status,
         "sandbox_loop_count": data.get("sandbox_loop_count", 0),
-        "compliance_loop_count": data.get("compliance_loop_count", 0),
         "files_generated": len(data.get("result", {}) or {}) if isinstance(data.get("result"), dict) else 0,
         "score_pass": score["pass"] if score else None,
         "score_error": (score or {}).get("error"),
@@ -401,6 +499,7 @@ def _process_one(problem, run_id, per_q_timeout):
                                "submit_error", error=str(e))
         _append_result(result)
         print(f"  [{tid:<22}] SUBMIT_ERROR in {result['elapsed_seconds']}s: {e}")
+        _cleanup_workspace(result.get("job_id"))
         return result
 
     print(f"  [{tid:<22}] submitted {job_id}")
@@ -421,6 +520,7 @@ def _process_one(problem, run_id, per_q_timeout):
                                          f"(backbone health issue)")
             _append_result(result)
             print(f"  [{tid:<22}] QUEUE_TIMEOUT (no worker start in {QUEUE_GRACE}s)")
+            _cleanup_workspace(job_id)
             return result
 
         if deadline is not None and time.time() > deadline:
@@ -431,6 +531,7 @@ def _process_one(problem, run_id, per_q_timeout):
             _append_result(result)
             print(f"  [{tid:<22}] TIMEOUT after {result['elapsed_seconds']}s "
                   f"(worker budget {per_q_timeout}s exceeded)")
+            _cleanup_workspace(job_id)
             return result
 
         try:
@@ -458,15 +559,18 @@ def _process_one(problem, run_id, per_q_timeout):
         if node != last_node:
             last_node = node
             print(f"  [{tid:<22}] {time.time() - submit_time:>7.1f}s -> {node}  "
-                  f"(sbox={data.get('sandbox_loop_count', 0)} "
-                  f"comp={data.get('compliance_loop_count', 0)})")
+                  f"(sbox={data.get('sandbox_loop_count', 0)})")
 
         if status in ("completed", "failed", "cancelled", "exhausted", "infra_exhausted"):
             score = None
             if status == "completed":
                 print(f"  [{tid:<22}] scoring against canonical tests...")
                 try:
-                    score = score_problem(job_id, problem)
+                    global _SCORER_SEM
+                    assert _SCORER_SEM is not None, "scorer semaphore not initialized"
+                    with _SCORER_SEM:
+                        score = score_problem(job_id, problem)
+                    _drop_caches()
                 except Exception as e:
                     score = {"pass": False, "error": f"scorer error: {e}",
                              "extracted": False}
@@ -477,28 +581,39 @@ def _process_one(problem, run_id, per_q_timeout):
             verdict = "PASS" if (score or {}).get("pass") else "FAIL"
             score_str = f" score={verdict}" if score else ""
             print(f"  [{tid:<22}] {verdict} in {result['elapsed_seconds']}s  |  "
-                  f"status={status} sbox={result['sandbox_loop_count']} "
-                  f"comp={result['compliance_loop_count']}{score_str}")
+                  f"status={status} sbox={result['sandbox_loop_count']}{score_str}")
+            _cleanup_workspace(job_id)
             return result
 
         time.sleep(POLL_INTERVAL)
 
 
 def run_problems_concurrent(problems, run_id, batch_size=DEFAULT_BATCH_SIZE,
-                             per_q_timeout=PER_Q_TIMEOUT):
+                             per_q_timeout=PER_Q_TIMEOUT,
+                             scorer_concurrency=DEFAULT_SCORER_CONCURRENCY):
     """Run problems slot-based: at most `batch_size` jobs in flight at once.
 
     Each worker thread loops: submit -> poll -> score -> pick up the next
     problem. This bounds queue wait to near zero. There is no whole-run kill
     switch -- each job has its own deadline computed from `started_at`.
+
+    The heavy BigCodeBench scoring containers are gated by
+    `scorer_concurrency` so at most that many can be running at once,
+    regardless of `batch_size`.
     """
+    global _SCORER_SEM
+    _SCORER_SEM = threading.Semaphore(scorer_concurrency)
+
     run_start = time.time()
     print(f"\nBigCodeBench Instruct-Hard run: {run_id}")
     print(f"  Problems:    {len(problems)}")
     print(f"  API:         {BASE_URL}")
     print(f"  Concurrency: {batch_size} (slot-based)")
+    print(f"  Scorer cap:  {scorer_concurrency} (docker {SCORE_IMAGE}, {SCORE_TIMEOUT}s timeout)")
     print(f"  Per-job cap: {per_q_timeout}s (from worker start)")
-    print(f"  Scoring:     docker {SCORE_IMAGE}, {SCORE_TIMEOUT}s timeout")
+    print(f"  Cleanup:     drop_caches after scoring, workspace prune enabled"
+          f"{' (--keep-workspaces)' if _KEEP_WORKSPACES else ''}")
+    print(f"  Docker prune: every {_DOCKER_PRUNE_INTERVAL} tasks")
 
     problem_iter = iter(problems)
     counter_lock = threading.Lock()
@@ -518,6 +633,8 @@ def run_problems_concurrent(problems, run_id, batch_size=DEFAULT_BATCH_SIZE,
                 results.append(result)
                 done_count[0] += 1
                 idx = done_count[0]
+            if idx % _DOCKER_PRUNE_INTERVAL == 0:
+                _docker_prune()
             print(f"  ---- [{idx}/{len(problems)}] done ----")
 
     with ThreadPoolExecutor(max_workers=batch_size) as executor:
@@ -584,16 +701,31 @@ def print_summary():
     print(f"  pass@1:   {passed}/{total} = {passed/total*100:.1f}%" if total else "  pass@1: n/a")
 
 
-def rescore_existing(run_id=None, out_file=None):
+def _scored_score_problem(job_id: str, problem: dict) -> dict:
+    """Wrapper around score_problem that respects the scorer semaphore."""
+    global _SCORER_SEM
+    assert _SCORER_SEM is not None, "scorer semaphore not initialized"
+    with _SCORER_SEM:
+        score = score_problem(job_id, problem)
+    _drop_caches()
+    return score
+
+
+def rescore_existing(run_id=None, out_file=None,
+                     scorer_concurrency=DEFAULT_SCORER_CONCURRENCY):
     """Re-score completed jobs from their on-disk src/main.py.
 
     Reads RESULTS_FILE, finds rows whose status is 'completed', and re-runs
     score_problem against the canonical BigCodeBench tests. Writes one JSON
     line per re-scored task to out_file (default: bigcodebench_rescore.jsonl).
+    Scoring container concurrency is gated by `scorer_concurrency`.
     """
     if not RESULTS_FILE.exists():
         print("No results file found.")
         return
+
+    global _SCORER_SEM
+    _SCORER_SEM = threading.Semaphore(scorer_concurrency)
 
     all_problems = load_problems()
     by_tid = {p["task_id"]: p for p in all_problems}
@@ -622,7 +754,7 @@ def rescore_existing(run_id=None, out_file=None):
     print(f"\nRe-scoring {len(candidates)} completed jobs against canonical BigCodeBench tests")
     print(f"  Workspace: {WORKSPACE_ROOT}")
     print(f"  Output:    {out_path}")
-    print(f"  Scoring:   docker {SCORE_IMAGE}, {SCORE_TIMEOUT}s timeout")
+    print(f"  Scorer cap: {scorer_concurrency} (docker {SCORE_IMAGE}, {SCORE_TIMEOUT}s timeout)")
 
     results = []
     passed = 0
@@ -630,7 +762,7 @@ def rescore_existing(run_id=None, out_file=None):
         futures = {}
         for r in candidates:
             problem = by_tid[r["task_id"]]
-            futures[executor.submit(score_problem, r["job_id"], problem)] = r
+            futures[executor.submit(_scored_score_problem, r["job_id"], problem)] = r
         done = 0
         for fut in as_completed(futures):
             r = futures[fut]
@@ -705,7 +837,11 @@ def main():
     parser.add_argument("--ids", nargs="*", default=None, help="Specific task_ids")
     parser.add_argument("--subset", default="hard", help="Dataset subset (default: hard)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help="Concurrent submissions (default 6)")
+                        help="Concurrent job submission/polling (default 6)")
+    parser.add_argument("--scorer-concurrency", type=int, default=None,
+                        help="Max concurrent BigCodeBench scoring containers "
+                             "(default 3, or BCB_SCORER_CONCURRENCY env var). "
+                             "Lower on hosts with slow disk or limited RAM.")
     parser.add_argument("--per-q-timeout", type=int, default=PER_Q_TIMEOUT,
                         help=f"Per-job timeout in seconds, measured from worker "
                              f"start (default {PER_Q_TIMEOUT})")
@@ -716,19 +852,45 @@ def main():
                         help="Only re-score rows with this run_id (used with --rescore)")
     parser.add_argument("--rescore-out", default=None,
                         help="Output file for --rescore (default: bigcodebench_rescore.jsonl)")
+    parser.add_argument("--deps-cache-tag", default=None,
+                        help="Persist installed deps under a shared tag for project-long work")
+    parser.add_argument("--keep-workspaces", action="store_true",
+                        help="Do not delete task workspaces after scoring (for debugging)")
+    parser.add_argument("--clear-deps-cache", action="store_true",
+                        help="Wipe the shared .deps_cache directory and exit")
     args = parser.parse_args()
+
+    global _KEEP_WORKSPACES
+    _KEEP_WORKSPACES = args.keep_workspaces
+
+    if args.clear_deps_cache:
+        cache_root = WORKSPACE_ROOT.parent / ".deps_cache"
+        if cache_root.exists():
+            shutil.rmtree(cache_root)
+            print(f"Cleared dependency cache: {cache_root}")
+        else:
+            print(f"No dependency cache to clear: {cache_root}")
+        return
 
     if args.summary:
         print_summary()
         return
 
+    scorer_conc = args.scorer_concurrency
+    if scorer_conc is None:
+        scorer_conc = int(os.environ.get("BCB_SCORER_CONCURRENCY", DEFAULT_SCORER_CONCURRENCY))
+
     if args.rescore:
-        rescore_existing(run_id=args.rescore_run, out_file=args.rescore_out)
+        rescore_existing(run_id=args.rescore_run, out_file=args.rescore_out,
+                         scorer_concurrency=scorer_conc)
         return
 
     if args.url:
         global_url = args.url
         BASE_URL = global_url
+
+    if args.deps_cache_tag:
+        set_deps_cache_tag(args.deps_cache_tag)
 
     run_id = args.label or f"bcb_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -738,7 +900,8 @@ def main():
         return
 
     run_problems_concurrent(problems, run_id, batch_size=args.batch_size,
-                             per_q_timeout=args.per_q_timeout)
+                             per_q_timeout=args.per_q_timeout,
+                             scorer_concurrency=scorer_conc)
 
 
 if __name__ == "__main__":

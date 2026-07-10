@@ -40,17 +40,8 @@ nodes:
         temperature: 0.1
         api_key_env_var: "OLLAMA_API_KEY"
 
-    # Final semantic check that the prompt's requirements are covered.
-    # WORKLOAD: medium-light — structured classification.
-    prompt_compliance_checker:
-        provider: "ollama-cloud"
-        model: "nemotron-3-nano:30b-cloud"
-        temperature: 0
-        api_key_env_var: "OLLAMA_API_KEY"
-
 loop_limits:
     max_sandbox_loops: 5
-    max_compliance_loops: 2
 
 resilience:
     # Per-node infra retries for transient LLM faults (timeouts, 5xx, conn drops).

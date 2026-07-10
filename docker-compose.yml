@@ -59,6 +59,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Shared workspace volume (must match backbone mount)
       - ./mupin-coding-module/.workspaces:/app/.workspaces
+      # Source code mounted so changes take effect without rebuilding images.
+      - ./mupin-coding-module/src:/app/src:ro
       # Per-node LLM routing config
       - ./mupin-coding-module/llm_config.yaml:/app/llm_config.yaml:ro
       # Language profiles
@@ -94,6 +96,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./mupin-coding-module/.workspaces:/app/.workspaces
+      - ./mupin-coding-module/src:/app/src:ro
       - ./mupin-coding-module/llm_config.yaml:/app/llm_config.yaml:ro
       - ./mupin-coding-module/profiles:/app/profiles:ro
     depends_on:

@@ -1,8 +1,8 @@
 """Shared state schema for the v0.2 agentic coding pipeline.
 
-The v0.2 pipeline is intentionally smaller than v0.1: a test architect, a
-coder, a sandbox arbiter, and a prompt-compliance checker. All routing is
-done by writing `next_node` and reading it in conditional edges.
+The v0.2 pipeline is intentionally smaller than v0.1: test_designer,
+skeleton_maker, coder, and sandbox_arbiter. All routing is done by writing
+`next_node` and reading it in conditional edges.
 """
 
 from operator import add
@@ -25,6 +25,12 @@ class AgenticState(TypedDict):
     # tests, which follow the prompt contract rather than the pipeline's tests.
     contract_code: Optional[str]
 
+    # Optional project tag for a persistent dependency cache. When unset (the
+    # default) each task starts and ends with a clean .deps directory. When set,
+    # installed deps are kept at .deps_cache/<tag>/<hash(requirements)> on the
+    # shared workspace volume and reused across tasks with identical deps.
+    deps_cache_tag: Optional[str]
+
     # ------------------------------------------------------------------
     # Code artifacts (single-file contract)
     # ------------------------------------------------------------------
@@ -37,16 +43,9 @@ class AgenticState(TypedDict):
     sandbox_diagnostics: Dict[str, Any]
 
     # ------------------------------------------------------------------
-    # Compliance checker outputs
-    # ------------------------------------------------------------------
-    compliance_status: str
-    compliance_critique: List[str]
-
-    # ------------------------------------------------------------------
     # Loop counters / guard rails
     # ------------------------------------------------------------------
     sandbox_loop_count: int
-    compliance_loop_count: int
 
     # ------------------------------------------------------------------
     # Test/skeleton contract loop tracking

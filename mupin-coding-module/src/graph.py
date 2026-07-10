@@ -1,6 +1,6 @@
 """v0.2 LangGraph workflow.
 
-Pipeline: test_designer → skeleton_maker → coder → sandbox_arbiter → prompt_compliance_checker.
+Pipeline: test_designer → skeleton_maker → coder → sandbox_arbiter → FINISH.
 All routing is done by writing `next_node` and reading it via conditional edges.
 """
 
@@ -12,9 +12,7 @@ from .nodes import (
     skeleton_maker,
     coder,
     sandbox_arbiter,
-    prompt_compliance_checker,
     route_from_sandbox,
-    route_from_compliance,
 )
 
 workflow = StateGraph(AgenticState)
@@ -23,7 +21,6 @@ workflow.add_node("test_designer",               test_designer)
 workflow.add_node("skeleton_maker",              skeleton_maker)
 workflow.add_node("coder",                       coder)
 workflow.add_node("sandbox_arbiter",             sandbox_arbiter)
-workflow.add_node("prompt_compliance_checker",   prompt_compliance_checker)
 
 workflow.set_entry_point("test_designer")
 
@@ -51,15 +48,8 @@ workflow.add_conditional_edges(
     {
         "test_designer": "test_designer",
         "coder": "coder",
-        "prompt_compliance_checker": "prompt_compliance_checker",
         "FINISH": END,
     },
-)
-
-workflow.add_conditional_edges(
-    "prompt_compliance_checker",
-    route_from_compliance,
-    {"test_designer": "test_designer", "prompt_compliance_checker": "prompt_compliance_checker", "FINISH": END},
 )
 
 app = workflow.compile()

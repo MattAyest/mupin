@@ -1,3 +1,104 @@
+## 30. Remove `prompt_compliance_checker` from the pipeline (2026-07-10)
+
+**Problem:** The `prompt_compliance_checker` node was a dead quality gate. In the `bcb_hard_r5` BigCodeBench run, **0/82 failures had `compliance_loop_count > 0`** — the `nemotron-3-nano:30b` model approved every solution, including wrong ones. In the more recent `bcb_r9` run, only **4/106 completed tasks triggered a compliance loop**, and none effectively caught wrong code. The node consumed 100+ LLM calls per run, added latency, and produced false confidence without improving reliability. The §21 behavioral-test strengthening and §23 contract-extraction changes were intended to reduce reliance on the compliance checker, but the node itself was never actually removed or replaced.
+
+**Decision:** Remove the compliance checker entirely. The sandbox arbiter (ruff, mypy, pytest) plus behavioral tests and contract fidelity is the quality gate. This is the clean removal, not a stub: all references across the codebase were deleted.
+
+**Files changed:**
+- `src/graph.py` — removed the `prompt_compliance_checker` node, its conditional edges, and the `route_from_compliance` import. Pipeline is now `test_designer → skeleton_maker → coder → sandbox_arbiter → FINISH`.
+- `src/nodes.py` — deleted the `prompt_compliance_checker` function and `route_from_compliance`. Sandbox pass now routes directly to `FINISH`. Removed `MAX_COMPLIANCE_LOOPS` and the `compliance_critique` injection in `test_designer`.
+- `src/state.py` — removed `compliance_status`, `compliance_critique`, and `compliance_loop_count` from `AgenticState`.
+- `src/runner.py` — updated `drive_graph` and `run_swarm_task` to stop tracking compliance fields. A task is now `completed` when the sandbox arbiter passes (no `sandbox_errors`), not after a compliance PASS.
+- `src/api.py` — removed `compliance_loop_count` and `compliance_status` from `TaskStatusResponse` and `_map_job_to_task`.
+- `src/worker.py` — removed `prompt_compliance_checker` from the progress-throttle trigger set and dropped compliance fields from the final progress post.
+- `src/profile.py` — removed `compliance_checker_system` from the required profile prompts.
+- `profiles/python.yaml` — deleted the entire `compliance_checker_system` prompt block.
+- `llm_config.yaml` — removed the `prompt_compliance_checker` node config and `max_compliance_loops`.
+- `mupin-api-backbone/src/models.py` — removed `compliance_loop_count` and `compliance_status` from `JobProgress`.
+- `mupin-api-backbone/src/main.py` — removed those fields from the internal progress update.
+- `benchmarks/bigcodebench_runner.py`, `benchmarks/humaneval_runner.py`, `benchmarks/runner.py` — removed `compliance_loop_count`/`compliance_status` from polling, result rows, and log output.
+- `README.md` — updated architecture diagram, node table, model table, status descriptions, and config example for the four-node pipeline.
+- `SESSION_NOTES.md` — this entry; updated §3, §4, §5, §6, §7 references to remove the compliance checker from onboarding docs (kept historical mentions intact).
+
+**Verification:**
+- `python3 -m py_compile` on all changed Python files.
+- `docker compose up --build` to confirm backbone + worker start cleanly.
+- Smoke test: submit a simple task and confirm `status=completed` after the sandbox passes.
+
+**Next step:** Apply the `QUEUE_GRACE = 600 → 1800` fix to `benchmarks/bigcodebench_runner.py` and run the clean `bcb_r10` BigCodeBench Instruct-Hard benchmark.
+
+---
+
+## 29. BigCodeBench runner now drops page cache and cleans workspaces after each task (2026-07-10)
+
+**Problem:** BigCodeBench runs continued to freeze the Proxmox guest VM even after §27 capped scoring-container concurrency at 3 (`bcb_r8` froze after only 8/148 tasks). The Proxmox UI showed the guest's allocated memory slowly rising throughout the run, then the VM hard-hung. `last reboot` shows `crash` reboots on Jul 4, Jul 6, Jul 8, and Jul 9.
+
+**Root cause:** Each scoring task spawns a fresh `docker run --rm` of `bigcodebench/bigcodebench-evaluate:latest`, re-reading the ~25 GB image layers into the guest's Linux page cache. The guest kernel *should* reclaim these clean file pages under pressure, but on the emulated virtio-scsi/QEMU disk the reclamation is too sluggish to keep up with 148 tasks. The page cache therefore grew monotonically until the guest ran out of usable memory and wedged. In addition, task workspaces in `.workspaces/` were never deleted, so 887 directories (519 MB) accumulated on disk and kept being re-read into cache. No module in the pipeline or runner took responsibility for cleaning up after itself.
+
+**Solution:** Make the benchmark runner clean up its own footprint after every task:
+1. `_drop_caches()` — after each `score_problem()` call, run a tiny privileged helper container (`docker run --rm --privileged --pid=host alpine sh -c "echo 3 > /proc/sys/vm/drop_caches"`) to drop the guest VM's page cache. The runner cannot write `/proc/sys/vm/drop_caches` directly because it is read-only inside the worker container, but it has the host Docker socket mounted.
+2. `_cleanup_workspace(job_id)` — after a task reaches any terminal status (completed/failed/timeout/queue_timeout/submit_error), delete its `.workspaces/<job_id>` directory unless `--keep-workspaces` is set. This prevents the 887-directory accumulation.
+3. `_docker_prune()` — every 20 completed tasks, run `docker container prune -f --filter status=exited` to clear any leftover metadata from `--rm` scoring containers.
+4. New CLI flag `--keep-workspaces` to retain workspaces for debugging (default: off, i.e., clean up).
+
+**Files changed:**
+- `benchmarks/bigcodebench_runner.py` — `_drop_caches()`, `_docker_prune()`, `_cleanup_workspace()`; `_KEEP_WORKSPACES` and `_DOCKER_PRUNE_INTERVAL` globals; `--keep-workspaces` flag; cleanup calls in all terminal paths of `_process_one`; `_drop_caches()` in `_scored_score_problem` for rescoring; updated run banner and docstring.
+- `README.md` — documented `--keep-workspaces` and the cleanup behavior in the BigCodeBench runner section.
+- `SESSION_NOTES.md` — this entry.
+
+**Smoke-test result:** A 20-problem run with the cleanup fix (`--limit 20 --scorer-concurrency 2`) kept the guest's `Cached` memory flat; `cat /proc/meminfo` showed the cache being dropped after each scoring task instead of climbing monotonically. The run completed without freezing the VM.
+
+**Full-run result:** `bcb_r9` completed all 148 tasks without freezing the VM. Deduped result: **45/148 = 30.4% pass@1** (all tasks) or **45/106 = 42.5%** on completed tasks. The remaining 42 tasks were non-completed, dominated by 30 `queue_timeout` failures caused by `QUEUE_GRACE=600s` being too short for worker throughput.
+
+**Next step:** Remove the dead `prompt_compliance_checker` node (§30), raise `QUEUE_GRACE`, and re-run BigCodeBench.
+
+---
+
+## 28. Empty LLM responses under load cause `test_designer` failures (2026-07-09)
+
+**Problem:** The 20-question Tier 2 benchmark (`run_20260709_174258`) scored only 16/20. Four harder questions — `evaluator`, `token_bucket`, `min_heap`, `bounded_queue` — all failed with `status=exhausted` and `error="Pipeline terminated without passing compliance"` after just ~9–12 seconds of processing. Their task logs showed `test_designer` calls returning 0 output tokens:
+```
+LLM success attempt 1/3: 7.349s, ~2453 tokens (in=2453, out=0)
+Missing required files: {'tests/__init__.py', 'tests/test_main.py'}
+[test_designer] ERROR: missing files ['tests/__init__.py', 'tests/test_main.py']
+```
+
+**Root cause:** The LLM backend (Ollama/Ollama Cloud) can return a successful but completely empty response under concurrent load. `_invoke_with_retry` in `src/nodes.py` only retried on `FutureTimeoutError` and exceptions; it treated an empty-string response with no error as a success. With no files generated, the pipeline immediately terminated.
+
+**Solution:** Added an explicit empty-response check inside `_invoke_with_retry` so that a successful but empty LLM response is treated as a transient failure and retried (up to the existing `max_attempts`).
+
+**Files changed:**
+- `src/nodes.py` — after a successful LLM call, raise `Exception("LLM returned empty response (0 output tokens)")` when `content.strip()` is empty.
+
+**Result:** Re-running the Tier 2 suite (`run_20260709_182340`) improved the score from 16/20 to **19/20**. The three previously empty-response questions (`token_bucket`, `min_heap`, `bounded_queue`) all passed. The remaining failure, `evaluator`, now progressed to `coder` and failed later with `infra_exhausted` (LLM retries exhausted), confirming the original issue was the empty-response problem.
+
+---
+
+## 27. BigCodeBench R7 crash: I/O wedge from unconstrained scoring concurrency (2026-07-09)
+
+**Problem:** The Proxmox VM hard-hung during `bcb_r7` around 2026-07-08 12:12 BST (11:12 UTC). `last reboot` marks the boot as `crash`; the journal abruptly stops at 11:12:28 with no shutdown sequence and no OOM-killer lines. The run had only completed 10/148 tasks before the guest froze. The host then sat hung for ~20h until a manual reboot at 08:37 on Jul 9.
+
+**Root cause:** The guest VM does not see the host's 1 TB NVMe directly (`/dev/nvme*` is absent); `/dev/sda` is a virtio-scsi/QEMU-emulated "QEMU HARDDISK" backed by ZFS on the host. The BigCodeBench scoring container (`bigcodebench/bigcodebench-evaluate:latest`, 24.8 GB on disk / 9.27 GB content) bundles ~13 GB of heavy pip layers (tensorflow, librosa, opencv, scikit-learn, pandas, scipy, transformers, accelerate). With the runner's `--batch-size 6`, **up to 6 scoring containers could start simultaneously** (because scoring happens inline inside each of the 6 worker threads). Six concurrent re-reads of the 4 GB tensorflow/librosa layer stack over the emulated virtio-scsi bus saturated the disk queue and froze the guest. This was **not** memory exhaustion: the guest has 55 GB RAM, currently uses 5.2 GB, and has 50 GB available; the "32 GB" the user observed was Linux page cache, which is reclaimable. The July 4 and July 6 `crash` reboots show the same pattern during earlier heavy benchmark runs.
+
+**Solution:** Decouple **scoring container concurrency** from **pipeline submit/poll concurrency**:
+1. Add a `threading.Semaphore` in `benchmarks/bigcodebench_runner.py` that gates *only* the `score_problem()` call site.
+2. The `ThreadPoolExecutor` still uses `--batch-size` (default 6) for job submission/polling; the semaphore caps concurrent scoring containers (default 3).
+3. Configurable via:
+   - CLI flag `--scorer-concurrency N`
+   - Environment variable `BCB_SCORER_CONCURRENCY=N`
+   - Fallback default `DEFAULT_SCORER_CONCURRENCY = 3`
+4. Apply the same semaphore to the `rescore_existing()` path so rescoring also respects the cap.
+5. Update runner docstring/help text to clarify that `--batch-size` now governs submit/poll concurrency only.
+
+**Files changed:**
+- `benchmarks/bigcodebench_runner.py` — semaphore; `DEFAULT_SCORER_CONCURRENCY`; `--scorer-concurrency` flag; `BCB_SCORER_CONCURRENCY` env lookup; semaphore in `score_problem` call site and in `rescore_existing`; updated run banner and help text.
+- `README.md` — documented `--scorer-concurrency` and `BCB_SCORER_CONCURRENCY`.
+- `SESSION_NOTES.md` — this entry.
+
+**Next step:** Run BigCodeBench with default scorer concurrency 3 (or even 2) to confirm the VM no longer wedges, then optionally bump toward 4 only on this specific host.
+
+---
+
 # Coding Module — Agent Onboarding (v0.2)
 
 > **Purpose:** This document gives a new AI agent everything needed to work on the Coding Module project without reading every source file. Read this first.
@@ -12,13 +113,11 @@ A self-healing Python code-generation microservice. A user posts a natural-langu
 2. `skeleton_maker` — derives a matching `src/main.py` skeleton from the tests and checks prompt/test/skeleton compatibility.
 3. `coder` — replaces the skeleton bodies with real logic so the tests pass.
 4. `sandbox_arbiter` — runs ruff, mypy, and pytest inside a hardened Docker container.
-5. `prompt_compliance_checker` — verifies the passing implementation actually covers every functional requirement in the user's prompt.
 
 If a node fails, it routes back to the node that can fix it:
 
 - test-side or contract faults → `test_designer`
 - implementation/runtime faults → `coder`
-- prompt-coverage gaps → `test_designer` with a critique
 - infrastructure faults → `FINISH`
 
 The service runs **inside Docker** (Docker-in-Docker) so the arbiter can spawn sibling `python:3.11-slim` containers via the host Docker socket.
@@ -70,9 +169,6 @@ coder
 sandbox_arbiter ───────┐
       │                │ (up to max_sandbox_loops)
       ▼                │
-prompt_compliance_checker
-      │                │
-      ▼                │
 FINISH ◄───────────────┘
 ```
 
@@ -93,11 +189,7 @@ class AgenticState(TypedDict):
     sandbox_errors: str              # last arbiter error / stdout+stderr
     sandbox_diagnostics: Dict[str, Any]   # structured fault classification
 
-    compliance_status: str           # "PASS" | "FAIL" | ""
-    compliance_critique: List[str]   # accumulated missing-feature notes
-
     sandbox_loop_count: int          # incremented each arbiter run
-    compliance_loop_count: int       # incremented each compliance retry
     contract_loop_count: int         # incremented each contract retry
     contract_critique: List[str]     # accumulated contract mismatch notes
     contract_exhausted: bool         # True if contract loop ceiling was reached
@@ -211,19 +303,7 @@ Failure classification:
 - `code_fault` (→ `coder`): ruff failure on src, mypy src failure, pytest failure.
 - `infra_fault` (→ `FINISH`): dep install failure, timeout, unexpected crash.
 
-### `prompt_compliance_checker`
 
-Reads `user_prompt`, `src/main.py`, and `tests/test_main.py`. Outputs JSON:
-
-```json
-{"compliance_status": "PASS" | "FAIL", "missing_features": ["..."]}
-```
-
-- `PASS` → `FINISH`.
-- `FAIL` with loops remaining → `test_designer` with the critique appended to `compliance_critique`.
-- `FAIL` at ceiling → `FINISH`.
-
----
 
 ## 6. API Layer (`src/api.py`)
 
@@ -236,7 +316,7 @@ In-memory `tasks_db` dict (not persistent across restarts). Endpoints:
 
 Tasks run as tracked `asyncio.Task` handles, so cancellation works at node boundaries.
 
-A task is `completed` only when the final node is `prompt_compliance_checker` and `compliance_status == "PASS"`.
+A task is `completed` when the `sandbox_arbiter` passes all checks (ruff, mypy, pytest).
 
 ---
 
@@ -247,7 +327,6 @@ Per-node provider/model/temperature. Loop limits and Docker settings are also he
 ```yaml
 loop_limits:
     max_sandbox_loops: 5
-    max_compliance_loops: 2
 
 docker:
     image: "python:3.11-slim"

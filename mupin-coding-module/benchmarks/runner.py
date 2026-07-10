@@ -64,10 +64,21 @@ def load_questions(ids=None):
     return questions
 
 
+_global_deps_cache_tag: str | None = None
+
+
+def set_deps_cache_tag(tag: str | None) -> None:
+    global _global_deps_cache_tag
+    _global_deps_cache_tag = tag
+
+
 def submit_task(prompt: str) -> str:
+    payload = {"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}}
+    if _global_deps_cache_tag:
+        payload["payload"]["deps_cache_tag"] = _global_deps_cache_tag
     resp = requests.post(
         f"{BASE_URL}/jobs",
-        json={"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}},
+        json=payload,
         timeout=10,
     )
     resp.raise_for_status()
@@ -81,8 +92,6 @@ def _normalize_job(data: dict) -> dict:
     normalized.setdefault("task_id", data.get("job_id"))
     normalized.setdefault("current_node", progress.get("current_node", data.get("status")))
     normalized.setdefault("sandbox_loop_count", progress.get("sandbox_loop_count", 0))
-    normalized.setdefault("compliance_loop_count", progress.get("compliance_loop_count", 0))
-    normalized.setdefault("compliance_status", progress.get("compliance_status"))
     normalized.setdefault("thoughts", progress.get("thoughts", []))
     return normalized
 
@@ -210,10 +219,8 @@ def _build_result(
         "status": status,
         "error": error or data.get("error"),
         "sandbox_loop_count": data.get("sandbox_loop_count", 0),
-        "compliance_loop_count": data.get("compliance_loop_count", 0),
         "files_generated": len(data.get("result") or {}),
         "thoughts_count": len(data.get("thoughts", [])),
-        "compliance_status": data.get("compliance_status"),
         **diagnostics,
     }
     append_metrics(_metrics_rows(run_id, question["id"], result, diagnostics))
@@ -318,8 +325,7 @@ def _process_one(
         if node != last_node:
             last_node = node
             print(f"  [{qid:<20}] {time.time() - submit_time:>7.1f}s -> {node}  "
-                  f"(sbox={data.get('sandbox_loop_count', 0)} "
-                  f"comp={data.get('compliance_loop_count', 0)})")
+                  f"(sbox={data.get('sandbox_loop_count', 0)})")
 
         if status in ("completed", "failed", "cancelled", "exhausted", "infra_exhausted"):
             result = _build_result(run_id, question, task_id, submit_time, submit_iso, status, data)
@@ -329,7 +335,6 @@ def _process_one(
                 f"queue={result.get('queue_wait_seconds', 0.0):.1f}s  "
                 f"process={result.get('processing_seconds', result['elapsed_seconds']):.1f}s  |  "
                 f"sbox={result['sandbox_loop_count']}  "
-                f"comp={result['compliance_loop_count']}  "
                 f"files={result['files_generated']}"
             )
             return result
@@ -435,9 +440,9 @@ def print_summary(results: list[dict]):
     print(f"{'═' * 70}")
     print(
         f"  {'ID':<20} {'DIFF':<8} {'STATUS':<10} {'TOTAL':>8}  "
-        f"{'QUEUE':>8}  {'PROCESS':>8}  {'SBOX':>4}  {'COMP':>4}  {'FILES':>5}"
+        f"{'QUEUE':>8}  {'PROCESS':>8}  {'SBOX':>4}  {'FILES':>5}"
     )
-    print(f"  {'─'*20} {'─'*8} {'─'*10} {'─'*8}  {'─'*8}  {'─'*8}  {'─'*4}  {'─'*4}  {'─'*5}")
+    print(f"  {'─'*20} {'─'*8} {'─'*10} {'─'*8}  {'─'*8}  {'─'*8}  {'─'*4}  {'─'*5}")
     total_elapsed = 0
     total_queue = 0.0
     total_process = 0.0
@@ -455,7 +460,6 @@ def print_summary(results: list[dict]):
             f"{r.get('queue_wait_seconds', 0.0):>7.1f}s  "
             f"{r.get('processing_seconds', r['elapsed_seconds']):>7.1f}s  "
             f"{r['sandbox_loop_count']:>4}  "
-            f"{r['compliance_loop_count']:>4}  "
             f"{r['files_generated']:>5}"
         )
     n = len(results)
@@ -606,13 +610,31 @@ def main():
                         help="Run questions one at a time instead of concurrently")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                         help=f"Maximum jobs submitted in one batch (default {DEFAULT_BATCH_SIZE})")
+    parser.add_argument("--deps-cache-tag", default=None,
+                        help="Persist installed deps under a shared tag for project-long work")
+    parser.add_argument("--clear-deps-cache", action="store_true",
+                        help="Wipe the shared .deps_cache directory and exit")
     args = parser.parse_args()
+
+    if args.clear_deps_cache:
+        # The tier-2 runner talks to the dev API on 8001 by default; the cache
+        # sits alongside the workspace volume in the project root.
+        cache_root = Path(__file__).resolve().parent.parent / ".deps_cache"
+        if cache_root.exists():
+            shutil.rmtree(cache_root)
+            print(f"Cleared dependency cache: {cache_root}")
+        else:
+            print(f"No dependency cache to clear: {cache_root}")
+        return
 
     if args.url:
         BASE_URL = args.url
 
     if args.per_q_timeout is not None:
         PER_Q_TIMEOUT = args.per_q_timeout
+
+    if args.deps_cache_tag:
+        set_deps_cache_tag(args.deps_cache_tag)
 
     if args.summary:
         print_historical_summary()

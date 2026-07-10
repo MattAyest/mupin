@@ -16,7 +16,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .graph import app as swarm_graph
-from .nodes import LLMUnavailableError, SERVER_TASK_DEADLINE, cleanup_sandbox_for_task
+from .nodes import (
+    LLMUnavailableError,
+    SERVER_TASK_DEADLINE,
+    cleanup_sandbox_for_task,
+    cleanup_workspace_deps,
+)
 
 
 async def drive_graph(
@@ -41,8 +46,6 @@ async def drive_graph(
     tasks_db_like = {
         "current_node": "initializing",
         "sandbox_loop_count": 0,
-        "compliance_loop_count": 0,
-        "compliance_status": "",
         "sandbox_errors": "",
         "thoughts": [],
         "node_history": [],
@@ -66,8 +69,6 @@ async def drive_graph(
 
                 for key in (
                     "sandbox_loop_count",
-                    "compliance_loop_count",
-                    "compliance_status",
                     "sandbox_errors",
                 ):
                     if key in state_update:
@@ -89,8 +90,6 @@ async def drive_graph(
                     await progress_callback({
                         "current_node": tasks_db_like["current_node"],
                         "sandbox_loop_count": tasks_db_like["sandbox_loop_count"],
-                        "compliance_loop_count": tasks_db_like["compliance_loop_count"],
-                        "compliance_status": tasks_db_like["compliance_status"],
                         "thoughts": tasks_db_like["thoughts"][-20:] if tasks_db_like["thoughts"] else [],
                     })
     finally:
@@ -107,6 +106,7 @@ async def run_swarm_task(
     is_cancelled=None,
     deadline: float | None = None,
     contract_code: str = "",
+    deps_cache_tag: str | None = None,
 ) -> Dict[str, Any]:
     """Run the full coding pipeline and return a serializable result payload.
 
@@ -127,13 +127,11 @@ async def run_swarm_task(
         "profile_name": profile_name,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "contract_code": contract_code,
+        "deps_cache_tag": deps_cache_tag,
         "file_manifest": {},
         "sandbox_errors": "",
         "sandbox_diagnostics": {},
-        "compliance_status": "",
-        "compliance_critique": [],
         "sandbox_loop_count": 0,
-        "compliance_loop_count": 0,
         "contract_loop_count": 0,
         "contract_critique": [],
         "contract_exhausted": False,
@@ -155,11 +153,9 @@ async def run_swarm_task(
         "status": "running",
         "current_node": "initializing",
         "sandbox_loop_count": 0,
-        "compliance_loop_count": 0,
         "workspace": workspace_dir,
         "result": None,
         "error": None,
-        "compliance_status": None,
         "llm_infra_exhausted": False,
         "llm_infra_retries": {},
         "thoughts": [],
@@ -178,8 +174,6 @@ async def run_swarm_task(
         result_payload["result"] = final_manifest
         result_payload["current_node"] = diagnostics["current_node"]
         result_payload["sandbox_loop_count"] = diagnostics["sandbox_loop_count"]
-        result_payload["compliance_loop_count"] = diagnostics["compliance_loop_count"]
-        result_payload["compliance_status"] = diagnostics["compliance_status"]
         result_payload["sandbox_errors"] = diagnostics["sandbox_errors"]
         result_payload["thoughts"] = diagnostics["thoughts"]
         result_payload["node_history"] = diagnostics["node_history"]
@@ -190,19 +184,16 @@ async def run_swarm_task(
         result_payload["llm_infra_retries"] = diagnostics["llm_infra_retries"]
 
         if (
-            diagnostics["current_node"] == "prompt_compliance_checker"
-            and diagnostics["compliance_status"] == "PASS"
+            diagnostics["current_node"] == "sandbox_arbiter"
+            and not diagnostics.get("sandbox_errors")
         ):
             result_payload["status"] = "completed"
         elif diagnostics["llm_infra_exhausted"]:
             result_payload["status"] = "infra_exhausted"
             result_payload["error"] = result_payload["error"] or "LLM infrastructure retries exhausted"
-        elif diagnostics["compliance_status"] == "FAIL":
-            result_payload["status"] = "exhausted"
-            result_payload["error"] = result_payload["error"] or "Compliance loop ceiling reached without passing"
         else:
             result_payload["status"] = "exhausted"
-            result_payload["error"] = result_payload["error"] or "Pipeline terminated without passing compliance"
+            result_payload["error"] = result_payload["error"] or "Pipeline terminated without passing sandbox"
 
     except asyncio.TimeoutError:
         result_payload["status"] = "exhausted"
@@ -236,5 +227,6 @@ async def run_swarm_task(
         except Exception:
             pass
         cleanup_sandbox_for_task(task_id)
+        cleanup_workspace_deps(workspace_dir)
 
     return result_payload

@@ -39,11 +39,9 @@ class TaskStatusResponse(BaseModel):
     status: str
     current_node: str | None = None
     sandbox_loop_count: int = 0
-    compliance_loop_count: int = 0
     workspace: str
     result: Dict[str, Any] | None = None
     error: str | None = None
-    compliance_status: str | None = None
     llm_infra_exhausted: bool = False
     thoughts: list[str] = []
     node_history: list[Dict[str, Any]] = []
@@ -65,11 +63,9 @@ def _map_job_to_task(job: Dict[str, Any]) -> Dict[str, Any]:
         "status": job["status"],
         "current_node": progress.get("current_node", job.get("status")),
         "sandbox_loop_count": progress.get("sandbox_loop_count", 0),
-        "compliance_loop_count": progress.get("compliance_loop_count", 0),
         "workspace": f".workspaces/{job['job_id']}",
         "result": job.get("result"),
         "error": job.get("error"),
-        "compliance_status": progress.get("compliance_status"),
         "llm_infra_exhausted": False,
         "thoughts": progress.get("thoughts", []),
         "node_history": [],

@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import hashlib
 import json
 import os
 import queue
@@ -112,7 +113,6 @@ SUPPORTED_PROVIDERS = (
 
 # Loop / ceiling constants
 MAX_SANDBOX_LOOPS = 5
-MAX_COMPLIANCE_LOOPS = 2
 MAX_CONTRACT_LOOPS = 2
 
 # Server-side hard wall-clock deadline per task. A backstop that auto-cancels a
@@ -478,6 +478,13 @@ def _invoke_with_retry(
                     f"~{usage['total_tokens']} tokens "
                     f"(in={usage['input_tokens']}, out={usage['output_tokens']})",
                 )
+
+            # Treat an empty successful response as a transient LLM failure so we
+            # retry instead of immediately failing the whole pipeline (observed when
+            # Ollama returns 0 output tokens under concurrent load).
+            if not content.strip():
+                raise Exception("LLM returned empty response (0 output tokens)")
+
             return content, usage_entries
         except FutureTimeoutError as e:
             last_error = e
@@ -765,6 +772,50 @@ def _chown_file_to_host(path: str) -> None:
         pass
 
 
+# ------------------------------------------------------------------------------
+# Dependency cache helpers
+# ------------------------------------------------------------------------------
+_DEPS_CACHE_INSTALLED_MARKER = ".deps_cache_installed"
+
+
+def _deps_requirements_hash(workspace: str, deps_file: str = "requirements.txt") -> str:
+    """Return a stable hash of the normalized requirements file content."""
+    path = os.path.join(workspace, deps_file)
+    if not os.path.exists(path):
+        return "no_requirements"
+    content = open(path, "r", encoding="utf-8").read()
+    deps = sorted(line.strip() for line in content.splitlines() if line.strip())
+    return hashlib.sha256("\n".join(deps).encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_dep_cache_dirs(workspace: str, tag: str) -> Tuple[str, str]:
+    """Return (container_path, host_path) for a tagged dependency cache entry.
+
+    The cache lives next to the workspaces directory so it is on the same shared
+    volume that is mounted into worker containers, but outside any per-task
+    workspace. Path: <workspace_parent>/.deps_cache/<tag>/<requirements_hash>.
+
+    The container path is used for all host-side file operations (makedirs,
+    chown, marker checks). The host path is only for ``docker run -v`` bind mounts.
+    """
+    container_root = os.path.dirname(workspace)
+    deps_hash = _deps_requirements_hash(workspace)
+    container_cache_dir = os.path.join(container_root, ".deps_cache", tag, deps_hash)
+    host_cache_dir = resolve_host_path(container_cache_dir)
+    return container_cache_dir, host_cache_dir
+
+
+def _dep_cache_hit(cache_dir: str) -> bool:
+    """True if a valid, non-empty tagged cache entry exists."""
+    marker = os.path.join(cache_dir, _DEPS_CACHE_INSTALLED_MARKER)
+    if not os.path.exists(marker):
+        return False
+    # A non-empty dir beyond the marker means packages are present.
+    for _ in os.scandir(cache_dir):
+        return True
+    return False
+
+
 def _write_workspace_file(workspace: str, filename: str, content: str) -> None:
     filepath = os.path.join(workspace, filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -775,7 +826,6 @@ def _write_workspace_file(workspace: str, filename: str, content: str) -> None:
 def _clear_directory(path: str) -> None:
     if os.path.exists(path):
         shutil.rmtree(path)
-
 
 def write_manifest_to_disk(workspace: str, manifest: Dict[str, str]) -> None:
     """Write the current manifest files to disk, clearing stale src/ and tests/ first."""
@@ -790,6 +840,17 @@ def write_manifest_to_disk(workspace: str, manifest: Dict[str, str]) -> None:
     # and write everything we just produced.
     _chown_to_host(os.path.join(workspace, "src"))
     _chown_to_host(os.path.join(workspace, "tests"))
+
+
+def cleanup_workspace_deps(workspace: str) -> None:
+    """Remove ephemeral dependency trees after a task finishes.
+
+    The generated source/tests and task.log are intentionally kept for scoring
+    and inspection, but the dependency install target and transient caches are
+    large and not needed once the task is done.
+    """
+    for subdir in (".deps", ".tmp", ".hypothesis"):
+        _clear_directory(os.path.join(workspace, subdir))
 
 
 def read_file_from_disk(workspace: str, filename: str) -> str:
@@ -827,7 +888,6 @@ def test_designer(state: AgenticState):
     prompt = state["user_prompt"]
     workspace = state.get("workspace_dir", "")
     manifest = state.get("file_manifest", {})
-    compliance_critique = state.get("compliance_critique", [])
     contract_critique = state.get("contract_critique", [])
     sandbox_errors = state.get("sandbox_errors", "")
     contract_loop = state.get("contract_loop_count", 0)
@@ -871,11 +931,6 @@ def test_designer(state: AgenticState):
             "\n\nContract compatibility critiques (the skeleton maker could not match these; "
             "revise your tests to be compatible with the prompt):\n"
             + "\n".join(f"- {c}" for c in contract_critique)
-        )
-    if compliance_critique:
-        user_prompt += (
-            "\n\nPrior compliance critiques (the previous implementation was missing these):\n"
-            + "\n".join(f"- {c}" for c in compliance_critique)
         )
     if sandbox_errors:
         user_prompt += (
@@ -1256,7 +1311,7 @@ def sandbox_arbiter(state: AgenticState):
     # the workspace remain owned by the host user.
     task_id = state.get("task_id", workspace.split("/")[-1])
 
-    hardening_flags = [
+    container_hardening = [
         f"--user={host_uid}:{host_gid}",
         f"--memory={memory_limit}",
         f"--memory-swap={memory_limit}",
@@ -1266,10 +1321,6 @@ def sandbox_arbiter(state: AgenticState):
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--stop-timeout=10",
-        "-v",
-        f"{resolve_host_path(workspace)}:/workspace",
-        "-w",
-        "/workspace",
         "-e",
         "HOME=/tmp",
         "-e",
@@ -1278,6 +1329,14 @@ def sandbox_arbiter(state: AgenticState):
         "PYTHONPYCACHEPREFIX=/tmp/pycache",
         "-e",
         f"SANDBOX_LOOP_COUNT={loop}",
+    ]
+
+    # Base workspace mount. For tagged dep caches we add a second bind that
+    # overrides /workspace/.deps with the shared cache directory.
+    workspace_mount = f"{resolve_host_path(workspace)}:/workspace"
+    base_mounts = [
+        "-v", workspace_mount,
+        "-w", "/workspace",
     ]
 
     # Writable tmpfs for tool caches and pip temp files. Used with --read-only
@@ -1293,59 +1352,117 @@ def sandbox_arbiter(state: AgenticState):
         "-e", "PIP_ROOT_USER_ACTION=ignore",
         "-e", "TMPDIR=/workspace/.tmp",
     ]
-    deps_file = profile.sandbox_value("deps_file", "requirements.txt")
-    install_script = profile.resolve(profile.sandbox_value("install_command", (
-        "mkdir -p /workspace/.tmp && "
-        f"pip install -q --target /workspace/.deps -r /workspace/{deps_file}"
-    )))
-    install_cmd = (
-        ["docker", "run", "--rm", "--name", f"{task_id}-install-{loop}"]
-        + hardening_flags
-        + tmpfs_flags
-        + install_env
-        + [IMAGE, "bash", "-c", install_script]
-    )
 
-    # Verification container: read-only root filesystem, no network, tmpfs for
-    # /tmp and /var/tmp. Only /workspace (the bind mount) is writable.
-    verify_env = [
-        "-e", "PYTHONPATH=/workspace/.deps",
-        "-e", "RUFF_CACHE_DIR=/tmp/ruff_cache",
-        "-e", "MYPY_CACHE_DIR=/tmp/mypy_cache",
-    ]
-    arbiter_script = profile.resolve(profile.sandbox_value("verify_command"))
-    arbiter_cmd = (
-        ["docker", "run", "--rm", "--network", "none", "--read-only", "--name", f"{task_id}-verify-{loop}"]
-        + hardening_flags
-        + tmpfs_flags
-        + verify_env
-        + [IMAGE, "bash", "-c", arbiter_script]
-    )
+    deps_file = profile.sandbox_value("deps_file", "requirements.txt")
+
+    # Decide whether to use a persistent tagged deps cache or the default
+    # clean-wipe per-task .deps directory.
+    deps_cache_tag = state.get("deps_cache_tag")
+    cache_container_dir: Optional[str] = None
+    cache_host_dir: Optional[str] = None
+    cache_hit = False
+    if deps_cache_tag:
+        cache_container_dir, cache_host_dir = _resolve_dep_cache_dirs(workspace, deps_cache_tag)
+        cache_hit = _dep_cache_hit(cache_container_dir)
+
+    # Extra bind mounts: for tagged caches, /workspace/.deps points at the
+    # shared cache directory. Otherwise pip installs into the workspace itself.
+    extra_mounts: List[str] = []
+    if cache_host_dir:
+        extra_mounts = ["-v", f"{cache_host_dir}:/workspace/.deps"]
 
     ws = workspace
     _diag(ws, "sandbox_arbiter", f"Running sandbox loop {loop}/{MAX_SANDBOX_LOOPS}")
 
     started = time.perf_counter()
     try:
-        # Phase 1: dependency install (network enabled)
-        install_started = time.perf_counter()
-        install_res = subprocess.run(
-            install_cmd, capture_output=True, text=True, timeout=timeout_install
-        )
-        install_duration = time.perf_counter() - install_started
-        if install_res.returncode != 0:
-            diag = (
-                f"Dependency install failed (loop {loop}):\n"
-                f"STDOUT:\n{install_res.stdout}\nSTDERR:\n{install_res.stderr}"
-            )
-            _diag(ws, "sandbox_arbiter", diag)
+        # Phase 1: dependency install (network enabled).
+        # Default is clean-slate: every attempt starts with a fresh target dir.
+        # With a tagged cache, a populated cache entry skips install entirely.
+        MAX_DEP_INSTALL_ATTEMPTS = 2
+        install_docker_runs: List[dict] = []
+        install_success = False
+        last_install_error = ""
+
+        if cache_hit:
+            _diag(ws, "sandbox_arbiter", f"Tagged dep cache hit: {cache_container_dir}")
+            install_success = True
+        else:
+            for attempt in range(1, MAX_DEP_INSTALL_ATTEMPTS + 1):
+                _diag(ws, "sandbox_arbiter", f"Dependency install attempt {attempt}/{MAX_DEP_INSTALL_ATTEMPTS}")
+                # Clean slate for every attempt.
+                _clear_directory(os.path.join(workspace, ".deps"))
+                _clear_directory(os.path.join(workspace, ".tmp"))
+                if cache_container_dir:
+                    _clear_directory(cache_container_dir)
+                    os.makedirs(cache_container_dir, exist_ok=True)
+                    _chown_to_host(cache_container_dir)
+
+                install_script = profile.resolve(profile.sandbox_value("install_command", (
+                    "mkdir -p /workspace/.tmp && "
+                    f"pip install -q --target /workspace/.deps -r /workspace/{deps_file}"
+                )))
+                install_cmd = (
+                    ["docker", "run", "--rm", "--name", f"{task_id}-install-{loop}-{attempt}"]
+                    + container_hardening
+                    + base_mounts
+                    + extra_mounts
+                    + tmpfs_flags
+                    + install_env
+                    + [IMAGE, "bash", "-c", install_script]
+                )
+
+                install_started = time.perf_counter()
+                install_res = subprocess.run(
+                    install_cmd, capture_output=True, text=True, timeout=timeout_install
+                )
+                install_duration = time.perf_counter() - install_started
+                install_docker_runs.append(
+                    _docker_run_record(loop, f"dep_install_attempt_{attempt}", install_duration, install_res.stdout, install_res.stderr)
+                )
+
+                if install_res.returncode == 0:
+                    install_success = True
+                    if cache_container_dir:
+                        marker = os.path.join(cache_container_dir, _DEPS_CACHE_INSTALLED_MARKER)
+                        open(marker, "w", encoding="utf-8").close()
+                        _chown_file_to_host(marker)
+                    break
+
+                last_install_error = (
+                    f"Dependency install attempt {attempt} failed (loop {loop}):\n"
+                    f"STDOUT:\n{install_res.stdout}\nSTDERR:\n{install_res.stderr}"
+                )
+                _diag(ws, "sandbox_arbiter", last_install_error)
+                if attempt < MAX_DEP_INSTALL_ATTEMPTS:
+                    time.sleep(2)
+
+        if not install_success:
             return _arbiter_failure(
                 ws,
                 loop,
                 status="infra_fault",
-                sandbox_errors=diag,
-                docker_runs=[_docker_run_record(loop, "dep_install_failed", install_duration, install_res.stdout, install_res.stderr)],
+                sandbox_errors=last_install_error,
+                docker_runs=install_docker_runs,
             )
+
+        # Verification container: read-only root filesystem, no network, tmpfs for
+        # /tmp and /var/tmp. Only /workspace (the bind mount) is writable.
+        verify_env = [
+            "-e", "PYTHONPATH=/workspace/.deps",
+            "-e", "RUFF_CACHE_DIR=/tmp/ruff_cache",
+            "-e", "MYPY_CACHE_DIR=/tmp/mypy_cache",
+        ]
+        arbiter_script = profile.resolve(profile.sandbox_value("verify_command"))
+        arbiter_cmd = (
+            ["docker", "run", "--rm", "--network", "none", "--read-only", "--name", f"{task_id}-verify-{loop}"]
+            + container_hardening
+            + base_mounts
+            + extra_mounts
+            + tmpfs_flags
+            + verify_env
+            + [IMAGE, "bash", "-c", arbiter_script]
+        )
 
         # Phase 2: arbiter run (network disabled)
         arbiter_started = time.perf_counter()
@@ -1372,7 +1489,9 @@ def sandbox_arbiter(state: AgenticState):
 
         diagnostics = _parse_sandbox_output(stdout, stderr, loop)
 
-        docker_runs = [_docker_run_record(loop, diagnostics["sandbox_status"], arbiter_duration, stdout, stderr)]
+        docker_runs = install_docker_runs + [
+            _docker_run_record(loop, diagnostics["sandbox_status"], arbiter_duration, stdout, stderr)
+        ]
 
         if diagnostics["sandbox_status"] == "pass":
             return {
@@ -1381,11 +1500,11 @@ def sandbox_arbiter(state: AgenticState):
                 "sandbox_diagnostics": diagnostics,
                 "sandbox_loop_count": loop,
                 "docker_runs": docker_runs,
-                "next_node": "prompt_compliance_checker",
+                "next_node": "FINISH",
                 "thoughts": _think(
                     ws,
                     "sandbox_arbiter",
-                    f"Loop {loop}: all sandbox checks PASS ({round(total_duration, 1)}s)",
+                    f"Loop {loop}: all sandbox checks PASS ({round(total_duration, 1)}s) — finishing",
                 ),
             }
 
@@ -1585,136 +1704,8 @@ def _arbiter_failure(
 
 
 # =============================================================================
-# NODE: prompt_compliance_checker
-# =============================================================================
-@node_with_history
-def prompt_compliance_checker(state: AgenticState):
-    prompt = state["user_prompt"]
-    workspace = state.get("workspace_dir", "")
-    manifest = state.get("file_manifest", {})
-    compliance_loop = state.get("compliance_loop_count", 0)
-    prior_critique = state.get("compliance_critique", [])
-
-    profile = _profile_from_state(state)
-    source_main_path = profile.file_path("source_main")
-    test_main_path = profile.file_path("test_main")
-
-    src_code = manifest.get(source_main_path, "")
-    test_code = manifest.get(test_main_path, "")
-
-    system = profile.prompt("compliance_checker_system")
-
-    user_prompt = f"User prompt:\n{prompt}\n\n{source_main_path}:\n{src_code}\n\n{test_main_path}:\n{test_code}"
-    if prior_critique:
-        user_prompt += (
-            "\n\nPrior compliance critiques:\n"
-            + "\n".join(f"- {c}" for c in prior_critique)
-        )
-
-    try:
-        content, llm_usage = _invoke_with_retry(
-            "prompt_compliance_checker",
-            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-            workspace,
-            state=state,
-        )
-    except LLMUnavailableError as e:
-        return _handle_llm_unavailable("prompt_compliance_checker", state, e, workspace)
-
-    # Extract JSON from the response (allow surrounding markdown fences).
-    json_match = re.search(
-        r"```(?:json)?\s*(\{.*?\})\s*```|\{.*\"compliance_status\".*\}",
-        content,
-        re.DOTALL,
-    )
-    raw_json = json_match.group(1) if json_match and json_match.group(1) else content
-    # Try to find any JSON object if the above failed.
-    if not raw_json.strip().startswith("{"):
-        obj_match = re.search(r"\{.*\}", content, re.DOTALL)
-        raw_json = obj_match.group(0) if obj_match else content
-
-    try:
-        verdict = json.loads(raw_json)
-    except Exception as e:
-        _diag(
-            workspace,
-            "prompt_compliance_checker",
-            f"Failed to parse compliance JSON. Raw content:\n{content[:2000]}\nParse error: {e}",
-        )
-        # Default to FAIL with the raw content as a critique.
-        verdict = {
-            "compliance_status": "FAIL",
-            "missing_features": [f"Compliance checker returned unparseable JSON: {str(e)[:200]}"],
-        }
-
-    status = verdict.get("compliance_status", "FAIL").upper()
-    missing = verdict.get("missing_features", []) or []
-    if not isinstance(missing, list):
-        missing = [str(missing)]
-    missing = [str(m) for m in missing if m]
-
-    _diag(
-        workspace,
-        "prompt_compliance_checker",
-        f"Compliance status: {status}\nMissing features: {missing}",
-    )
-
-    new_critique = list(prior_critique) + missing
-
-    if status == "PASS":
-        return {
-            "compliance_status": "PASS",
-            "compliance_critique": new_critique,
-            "llm_usage": llm_usage,
-            "next_node": "FINISH",
-            "thoughts": _think(
-                workspace,
-                "prompt_compliance_checker",
-                "Compliance PASS — finishing",
-            ),
-        }
-
-    new_compliance_loop = compliance_loop + 1
-    if new_compliance_loop <= MAX_COMPLIANCE_LOOPS:
-        return {
-            "compliance_status": "FAIL",
-            "compliance_critique": new_critique,
-            "compliance_loop_count": new_compliance_loop,
-            "sandbox_errors": "",
-            "sandbox_diagnostics": {},
-            "sandbox_loop_count": 0,
-            "llm_usage": llm_usage,
-            "next_node": "test_designer",
-            "thoughts": _think(
-                workspace,
-                "prompt_compliance_checker",
-                f"Compliance FAIL ({new_compliance_loop}/{MAX_COMPLIANCE_LOOPS}) → test_designer: {missing}",
-            ),
-        }
-
-    # Compliance loop ceiling reached.
-    return {
-        "compliance_status": "FAIL",
-        "compliance_critique": new_critique,
-        "compliance_loop_count": new_compliance_loop,
-        "llm_usage": llm_usage,
-        "next_node": "FINISH",
-        "thoughts": _think(
-            workspace,
-            "prompt_compliance_checker",
-            f"Compliance FAIL — loop ceiling reached, finishing",
-        ),
-    }
-
-
-# =============================================================================
 # Routing functions
 # =============================================================================
 def route_from_sandbox(state: AgenticState) -> str:
-    """Pure routing helper; kept as a function for readability and testing."""
-    return state.get("next_node", "FINISH")
-
-
-def route_from_compliance(state: AgenticState) -> str:
     """Pure routing helper; kept as a function for readability and testing."""
     return state.get("next_node", "FINISH")

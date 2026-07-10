@@ -3,7 +3,7 @@
 HumanEval+ benchmark runner for the Coding Module.
 
 Submits each HumanEval+ problem prompt through the full Mupin pipeline
-(test_designer -> skeleton_maker -> coder -> sandbox -> compliance) as a
+(test_designer -> skeleton_maker -> coder -> sandbox) as a
 normal coding job, then scores the generated src/main.py against the canonical
 HumanEval+ test suite.
 
@@ -123,7 +123,6 @@ def poll_task(task_id: str):
     normalized = dict(data)
     normalized.setdefault("current_node", progress.get("current_node", data.get("status")))
     normalized.setdefault("sandbox_loop_count", progress.get("sandbox_loop_count", 0))
-    normalized.setdefault("compliance_loop_count", progress.get("compliance_loop_count", 0))
     return normalized
 
 
@@ -263,7 +262,6 @@ def _build_result(run_id, problem, job_id, start_time, start_iso, status, data=N
         "queue_wait_seconds": queue_wait,
         "status": status,
         "sandbox_loop_count": data.get("sandbox_loop_count", 0),
-        "compliance_loop_count": data.get("compliance_loop_count", 0),
         "files_generated": len(data.get("result", {}) or {}) if isinstance(data.get("result"), dict) else 0,
         "score_pass": score["pass"] if score else None,
         "score_error": (score or {}).get("error"),
@@ -365,8 +363,7 @@ def _process_one(problem, run_id, per_q_timeout):
         if node != last_node:
             last_node = node
             print(f"  [{tid:<20}] {time.time() - submit_time:>7.1f}s -> {node}  "
-                  f"(sbox={data.get('sandbox_loop_count', 0)} "
-                  f"comp={data.get('compliance_loop_count', 0)})")
+                  f"(sbox={data.get('sandbox_loop_count', 0)})")
 
         if status in ("completed", "failed", "cancelled", "exhausted"):
             score = None
@@ -384,8 +381,7 @@ def _process_one(problem, run_id, per_q_timeout):
             verdict = "PASS" if (score or {}).get("pass") else "FAIL"
             score_str = f" score={verdict}" if score else ""
             print(f"  [{tid:<20}] {verdict} in {result['elapsed_seconds']}s  |  "
-                  f"status={status} sbox={result['sandbox_loop_count']} "
-                  f"comp={result['compliance_loop_count']}{score_str}")
+                  f"status={status} sbox={result['sandbox_loop_count']}{score_str}")
             return result
 
         time.sleep(POLL_INTERVAL)

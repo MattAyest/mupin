@@ -131,7 +131,6 @@ class Profile:
             "test_designer_system",
             "skeleton_maker_system",
             "coder_system",
-            "compliance_checker_system",
         }
         missing_prompts = required_prompt_keys - set(self.prompts.keys())
         if missing_prompts:

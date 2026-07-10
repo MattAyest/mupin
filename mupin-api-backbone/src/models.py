@@ -11,8 +11,6 @@ class JobSubmit(BaseModel):
 class JobProgress(BaseModel):
     current_node: Optional[str] = None
     sandbox_loop_count: int = 0
-    compliance_loop_count: int = 0
-    compliance_status: Optional[str] = None
     thoughts: list[str] = Field(default_factory=list)
 
 
