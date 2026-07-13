@@ -1,3 +1,60 @@
+## 32. Fix `infra_exhausted` misclassification — SSL/EOF/429 errors treated as permanent (2026-07-11)
+
+**Problem:** `bcb_r10` lost 13/148 tasks to `infra_exhausted`. All 13 failed with `"permanent fault"` and `"0 infra retries used"`, meaning `_handle_llm_unavailable` never retried — it went straight to exhausted. The actual errors were:
+
+| Error | Count | Node(s) |
+|---|---|---|
+| `SSL: UNEXPECTED_EOF_WHILE_READING` (Ollama Cloud dropping TLS under load) | 9 | coder (8), test_designer (1) |
+| `LLM returned empty response (0 output tokens)` | 3 | coder (3) |
+| HTTP 429 `too many concurrent requests` | 1 | skeleton_maker (1) |
+
+All three are transient provider faults, but `_is_transient_llm_error` returned `False` for them, so `_handle_llm_unavailable` classified them as **permanent** and immediately set `llm_infra_exhausted=True` without using any of the 5 available infra retries.
+
+**Root causes:**
+1. **Single-level unwrap**: `inner = getattr(e, "__cause__", None) or e` only unwrapped one level. The SSL error was wrapped 2+ levels deep (`httpx.ReadError → ssl.SSLEOFError`), so the class-name check against `TRANSIENT_ERROR_NAMES` never saw `SSLEOFError`.
+2. **Missing substrings**: The substring matcher checked for `"timeout"`, `"rate limit"`, etc., but NOT for `"ssl"`, `"eof"`, `"empty response"`, or `"too many concurrent requests"`.
+3. **Missing HTTP 429**: `TRANSIENT_HTTP_STATUSES` had `{502, 503, 504, 524}` but not `429` (Too Many Requests) or `500`.
+
+**Changes (`src/nodes.py`):**
+- `TRANSIENT_HTTP_STATUSES` — added `429` and `500`.
+- `_is_transient_llm_error` — walks the full `__cause__`/`__context__` chain instead of unwrapping one level. Each candidate in the chain is checked against `TRANSIENT_ERROR_NAMES`, substring tokens, and HTTP status codes.
+- Substring tokens expanded: added `"ssl"`, `"unexpected_eof"`, `"eof occurred"`, `"violation of protocol"`, `"incomplete read"`, `"chunked encoding"`, `"connection reset"`, `"remote disconnected"`, `"protocol error"`, `"empty response"`, `"too many concurrent requests"`.
+
+**Expected effect:** The 13 `infra_exhausted` tasks will now be classified as transient, getting up to 5 infra retries with backoff (10s, 30s, 60s, 120s, 120s) before exhausting. The SSL EOF errors from Ollama Cloud are intermittent — a 10-30s backoff is likely enough for the provider to recover.
+
+**Next step:** Re-run `bcb_r11` to verify the fix. Expect `infra_exhausted` to drop from 13 to near 0.
+
+---
+
+## 31. Raise `QUEUE_GRACE` 600→1800 in BigCodeBench runner (2026-07-11)
+
+**Problem:** `bcb_r9` lost 30/148 tasks to `queue_timeout` — the worker had all 6 slots busy with tasks taking ~1500–2700s each, so newly submitted jobs waited >600s for a slot and were cancelled before the worker ever started them. The `QUEUE_GRACE=600s` window (raised from 120s in §25 for the lighter Tier 2 runner) was too short for the 148-task BigCodeBench workload.
+
+**Change:** `benchmarks/bigcodebench_runner.py:74` — `QUEUE_GRACE = 600 → 1800`. The grace window is a safety net for a dead/sick backbone, not a queue-wait cap; the per-job deadline still measures from `started_at` (worker pickup), not submission time. Cost: infrastructure-failure detection slows from 10 min to 20 min, but in practice the backbone is healthy and just gets behind under load.
+
+**Note:** `bigcodebench` was not in `requirements.txt` — it had been manually `pip install`ed in the worker container during a previous session and lost when the container was recreated. Reinstalled before this run. Should be added to `Dockerfile`/`requirements.txt` to survive container rebuilds.
+
+**Run:** `bcb_r10` started in tmux session `bcb_r10` — full 148-task run with `--batch-size 6 --scorer-concurrency 2 --per-q-timeout 3600`. Used `python3 -u` (unbuffered) inside `docker exec` so output flushes to the log file via `tee`.
+
+**Result — `bcb_r10` complete (148/148, wall-clock ~3h53m):**
+
+| Metric | bcb_r9 | bcb_r10 |
+|---|---|---|
+| Completed | 106 | **130** |
+| Queue timeouts | 30 | **0** |
+| infra_exhausted | 6 | 12 |
+| exhausted | 3 | 4 |
+| timeout | 3 | 2 |
+| Non-completed total | 42 | **18** |
+| Pass@1 (all tasks) | 45/148 = 30.4% | **52/148 = 35.1%** |
+| Pass@1 (completed) | 45/106 = 42.5% | 52/130 = 40.0% |
+
+The `QUEUE_GRACE=1800` fix eliminated queue timeouts entirely (30→0) and recovered 24 additional tasks for processing. Pass@1 (all tasks) improved +4.7pp (30.4%→35.1%) driven by the higher completion count. Pass@1 on completed tasks held at ~40-42%, confirming the compliance-checker removal (§30) did not degrade quality. The remaining 18 non-completed failures are dominated by `infra_exhausted` (12) — LLM provider/DNS issues, not pipeline logic.
+
+**Next step:** The `infra_exhausted` failures are now the leading non-completion cause. Investigate whether increasing LLM retry budgets or improving DNS resilience can reduce them further.
+
+---
+
 ## 30. Remove `prompt_compliance_checker` from the pipeline (2026-07-10)
 
 **Problem:** The `prompt_compliance_checker` node was a dead quality gate. In the `bcb_hard_r5` BigCodeBench run, **0/82 failures had `compliance_loop_count > 0`** — the `nemotron-3-nano:30b` model approved every solution, including wrong ones. In the more recent `bcb_r9` run, only **4/106 completed tasks triggered a compliance loop**, and none effectively caught wrong code. The node consumed 100+ LLM calls per run, added latency, and produced false confidence without improving reliability. The §21 behavioral-test strengthening and §23 contract-extraction changes were intended to reduce reliance on the compliance checker, but the node itself was never actually removed or replaced.

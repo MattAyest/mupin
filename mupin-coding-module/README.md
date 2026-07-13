@@ -64,13 +64,13 @@ Swap models without rebuilding — `llm_config.yaml` is mounted read-only at run
 
 ## Getting started
 
-1. Copy `.env.example` to `.env` and set `OLLAMA_API_KEY`.
+1. The repo root `.env.example` provides shared configuration for all modules. Copy it to the repo root `.env` and set `OLLAMA_API_KEY`. You can also override values in `mupin-coding-module/.env` if needed.
 2. Build and start the full stack from the repo root:
    ```bash
    cd ..
    docker compose up --build -d
    ```
-   This starts Postgres, Redis, `mupin-api-backbone` (port 8001), the coding worker, and a dev proxy (port 8000).
+   This starts Postgres, Redis, `mupin-api-backbone` (port 8001), the coding worker, the editing worker, and dev proxies (coding at 8000, editing at 8003 by default).
 3. Submit a job through the backbone:
    ```bash
    curl -X POST http://localhost:8001/jobs \
@@ -256,7 +256,7 @@ python benchmarks/bigcodebench_runner.py --clear-deps-cache
 
 ## Configuration
 
-`llm_config.yaml` controls per-node models, loop limits, and Docker settings.
+`llm_config.yaml` controls per-node models, loop limits, and Docker settings. The module first loads its local `llm_config.yaml`; if that is missing it falls back to the root `llm_config.yaml` or `llm_config.yaml.example`.
 
 ```yaml
 loop_limits:

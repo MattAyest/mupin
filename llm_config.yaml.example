@@ -1,0 +1,56 @@
+# Mupin — unified root LLM configuration
+#
+# This is the global default per-node model routing. Each module may ship its
+# own llm_config.yaml. The module first tries to load its local
+# llm_config.yaml; if that is absent or incomplete, it falls back to this root
+# file. Values in the module file always win.
+
+nodes:
+    # Coding module nodes
+    test_designer:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.2
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    skeleton_maker:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.2
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    coder:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    # Editing module nodes
+    analyze:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.2
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    plan:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.2
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    apply:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
+loop_limits:
+    max_sandbox_loops: 5
+
+resilience:
+    infra_max_retries_per_node: 5
+    infra_retry_backoff_seconds: [10, 30, 60, 120, 120]
+    stream_idle_seconds: 120
+
+server:
+    task_deadline_seconds: 7200

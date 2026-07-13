@@ -17,10 +17,12 @@ env/
 .workspaces/
 coding-module/.workspaces/
 mupin-coding-module/.workspaces/
+mupin-editing-module/.workspaces/
 # Optional persistent shared dependency cache (large)
 .deps_cache/
 coding-module/.deps_cache/
 mupin-coding-module/.deps_cache/
+mupin-editing-module/.deps_cache/
 # Generated per-task snapshots (can be large)
 .workspace-snapshot/
 mupin-coding-module/.workspace-snapshot/
@@ -47,6 +49,16 @@ mupin-coding-module/benchmarks/humaneval_rescore*.jsonl
 mupin-coding-module/benchmarks/bigcodebench_results*.jsonl
 mupin-coding-module/benchmarks/tmux_*.log
 mupin-coding-module/benchmarks/tmux_*.sh
+
+# Editing module outputs
+mupin-editing-module/.workspaces/
+mupin-editing-module/.deps_cache/
+mupin-editing-module/benchmarks/*.jsonl
+mupin-editing-module/benchmarks/*.out
+mupin-editing-module/benchmarks/logs/*.out
+mupin-editing-module/benchmarks/logs/*.log
+mupin-editing-module/benchmarks/run_*.log
+mupin-editing-module/benchmarks/base_jobs.json
 
 # Ollama data & models
 ollama_data/

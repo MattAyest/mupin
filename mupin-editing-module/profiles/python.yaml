@@ -1,0 +1,225 @@
+# =============================================================================
+# Python 3.11 profile for the Editing Module v0.1
+# =============================================================================
+# This profile owns every Python-specific convention so the core pipeline
+# can stay language-agnostic. Future languages get their own profile YAML.
+#
+# The editing module reuses the coding module's sandbox verification stage,
+# so the sandbox and files sections are identical where possible.
+# Placeholders used in prompts and commands:
+#   __SOURCE_MAIN__       -> src/main.py
+#   __TEST_MAIN__         -> tests/test_main.py
+#   __SOURCE_INIT__       -> src/__init__.py
+#   __TEST_INIT__         -> tests/__init__.py
+#   __IMPORT_PATH__       -> src.main
+#   __DEPS_FILE__         -> requirements.txt
+# =============================================================================
+
+name: python
+display_name: Python 3.11
+default: true
+
+sandbox:
+  image: python:3.11-slim
+  cpus: "2.0"
+  memory: "512m"
+  timeout_install: 90
+  timeout_test: 120
+  deps_file: requirements.txt
+  default_deps:
+    - pytest
+    - hypothesis
+    - ruff
+    - mypy
+    - pytest-timeout
+  install_command: |
+    mkdir -p /workspace/.tmp && pip install -q --target /workspace/.deps -r /workspace/requirements.txt
+  verify_command: |
+    set -euo pipefail
+    export PYTHONPATH=/workspace/.deps
+    export RUFF_CACHE_DIR=/tmp/ruff_cache
+    export MYPY_CACHE_DIR=/tmp/mypy_cache
+
+    echo "__RUFF_FORMAT_SRC_START__"
+    python -m ruff format __SOURCE_MAIN__ || { echo "__RUFF_FORMAT_SRC_FAILED__"; exit 1; }
+    echo "__RUFF_FORMAT_SRC_OK__"
+
+    echo "__RUFF_FORMAT_TESTS_START__"
+    python -m ruff format __TEST_MAIN__ || { echo "__RUFF_FORMAT_TESTS_FAILED__"; exit 1; }
+    echo "__RUFF_FORMAT_TESTS_OK__"
+
+    echo "__RUFF_CHECK_SRC_START__"
+    python -m ruff check --fix __SOURCE_MAIN__ || { echo "__RUFF_CHECK_SRC_FAILED__"; exit 1; }
+    echo "__RUFF_CHECK_SRC_OK__"
+
+    echo "__RUFF_CHECK_TESTS_START__"
+    python -m ruff check --fix __TEST_MAIN__ || { echo "__RUFF_CHECK_TESTS_FAILED__"; exit 1; }
+    echo "__RUFF_CHECK_TESTS_OK__"
+
+    echo "__TAUTOLOGY_START__"
+    python -c "import ast,sys; tree=ast.parse(open('__TEST_MAIN__').read()); [sys.exit(1) for n in ast.walk(tree) if isinstance(n,ast.Compare) and len(n.comparators)==1 and ast.dump(n.left)==ast.dump(n.comparators[0])]" || { echo "__TAUTOLOGY_FAILED__"; exit 1; }
+    echo "__TAUTOLOGY_OK__"
+
+    echo "__MYPY_START__"
+    python -m mypy --ignore-missing-imports __SOURCE_MAIN__ || { echo "__MYPY_SRC_FAILED__"; exit 1; }
+    echo "__MYPY_OK__"
+
+    echo "__PYTEST_START__"
+    python -m pytest __TEST_MAIN__ \
+        -p no:cacheprovider \
+        --hypothesis-seed=42 \
+        --hypothesis-profile=sandbox \
+        --timeout=30 \
+        -v \
+        || { echo "__PYTEST_FAILED__"; exit 1; }
+    echo "__PYTEST_OK__"
+
+    echo "__SANDBOX_PASS__"
+
+files:
+  source_dir: src
+  test_dir: tests
+  source_main: src/main.py
+  test_main: tests/test_main.py
+  source_init: src/__init__.py
+  test_init: tests/__init__.py
+  manifest:
+    - src/main.py
+    - src/__init__.py
+    - tests/test_main.py
+    - tests/__init__.py
+    - requirements.txt
+
+workspace:
+  setup_files:
+    conftest.py: |
+      from hypothesis import HealthCheck, settings
+
+      settings.register_profile(
+          "sandbox",
+          max_examples=50,
+          deadline=5000,
+          suppress_health_check=[HealthCheck.too_slow],
+      )
+      settings.load_profile("sandbox")
+    pytest.ini: |
+      [pytest]
+      testpaths = tests
+      pythonpath = .
+
+prompts:
+  import_path: src.main
+  source_file: src/main.py
+  test_file: tests/test_main.py
+  deps_file: requirements.txt
+
+  # ---------------------------------------------------------------------------
+  # NODE: analyze
+  # ---------------------------------------------------------------------------
+  analyze_system: |
+    <role>
+    You are the Analyze step in an agentic code-editing pipeline.
+    </role>
+
+    <goal>
+    Read the user instruction and the current workspace files, then summarize
+    exactly what must change. Do not write code. Output only a concise analysis
+    and a list of affected files.
+    </goal>
+
+    <inputs>
+    - instruction: the user's editing request
+    - files: the current contents of the workspace files
+    </inputs>
+
+    <rules>
+    - Identify concrete, verifiable changes (e.g., "add a ValueError guard in
+      src/main.py", "add a test for empty input in tests/test_main.py").
+    - Note any files that should NOT be modified.
+    - Flag ambiguity in the instruction and pick the most likely intent.
+    </rules>
+
+    <output_format>
+    Return a short JSON object inside <analysis> tags:
+      <analysis>
+      {
+        "intent": "one-sentence summary",
+        "affected_files": ["src/main.py", "tests/test_main.py"],
+        "notes": ["any ambiguity or constraints"]
+      }
+      </analysis>
+    </output_format>
+
+  # ---------------------------------------------------------------------------
+  # NODE: plan
+  # ---------------------------------------------------------------------------
+  plan_system: |
+    <role>
+    You are the Plan step in an agentic code-editing pipeline.
+    </role>
+
+    <goal>
+    Given the analysis and current files, produce a precise edit plan. Each
+    step must name a file and describe the change in enough detail that an
+    editor could apply it without further reasoning.
+    </goal>
+
+    <rules>
+    - Every plan item must correspond to a single file.
+    - Be specific: include function names, line ranges if helpful, and exact
+      expected behavior of the result.
+    - Do not include generic advice; only actionable edits.
+    </rules>
+
+    <output_format>
+    Return the plan inside <plan> tags as a JSON array:
+      <plan>
+      [
+        {"file": "src/main.py", "change": "..."},
+        {"file": "tests/test_main.py", "change": "..."}
+      ]
+      </plan>
+    </output_format>
+
+  # ---------------------------------------------------------------------------
+  # NODE: apply
+  # ---------------------------------------------------------------------------
+  apply_system: |
+    <role>
+    You are the Apply step in an agentic code-editing pipeline.
+    </role>
+
+    <goal>
+    Rewrite the affected workspace files according to the edit plan. Preserve
+    all files that are not changing. Output only the final file contents.
+    </goal>
+
+    <inputs>
+    - instruction: the user's editing request
+    - plan: the concrete edit plan from the previous step
+    - files: the current contents of the workspace files
+    </inputs>
+
+    <rules>
+    - Only modify files listed in the plan.
+    - Do not change signatures, imports, or file names unless the plan explicitly
+      requires it.
+    - Keep the same style and structure as the original code.
+    - If new tests are added, make sure they import from __IMPORT_PATH__ and
+      follow pytest conventions.
+    - Do not output markdown fences, commentary, or explanations.
+    </rules>
+
+    <output_format>
+    Wrap each changed file exactly:
+      <file name="src/main.py">...</file>
+      <file name="tests/test_main.py">...</file>
+    You may omit unchanged files. Do not output any other files.
+    </output_format>
+
+    <quality_check>
+    Before finishing, verify that:
+    - The plan has been fully implemented.
+    - No unrelated files were modified.
+    - Tests remain importable and syntactically valid.
+    </quality_check>

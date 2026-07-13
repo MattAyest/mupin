@@ -1,10 +1,9 @@
-"""ARQ worker for the Mupin Coding Module.
+"""ARQ worker for the Mupin Editing Module.
 
-Consumes `coding` jobs from the Mupin API Backbone, drives the v0.2 LangGraph
-pipeline, reports progress back to the backbone, and writes task workspaces
-to the shared workspace volume.
+Consumes `editing` jobs from the Mupin API Backbone, drives the v0.1 editing
+pipeline, reports progress back to the backbone, and writes task workspaces to
+the shared workspace volume.
 """
-
 import asyncio
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ import httpx
 from arq.connections import RedisSettings
 
 from .config_loader import load_env_hierarchy
-from .runner import run_swarm_task
+from .runner import run_edit_task
 
 load_env_hierarchy()
 
@@ -44,12 +43,10 @@ async def _post_progress(job_id: str, progress: dict):
                 timeout=10,
             )
         except Exception:
-            # Progress posts are best-effort; failures should not kill the task.
             pass
 
 
 async def _mark_started(job_id: str) -> None:
-    """Notify the backbone that this worker has begun processing the job."""
     async with httpx.AsyncClient() as client:
         try:
             await client.post(
@@ -57,7 +54,6 @@ async def _mark_started(job_id: str) -> None:
                 timeout=10,
             )
         except Exception:
-            # Best-effort; the job can still run if the backbone is unreachable.
             pass
 
 
@@ -87,50 +83,40 @@ async def _finalize(job_id: str, payload: dict):
 
 async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
     """ARQ worker function invoked by the backbone queue."""
-    if job_type != "coding":
+    if job_type != "editing":
         return {"status": "failed", "error": f"Unknown job type: {job_type}"}
 
-    # Tell the backbone we have picked up this job so queue-wait metrics can
-    # be separated from actual processing time.
     await _mark_started(job_id)
 
-    # Cooperative cancellation: if cancel was requested before we started, stop now.
     if await _is_cancelled(job_id):
         await _finalize(job_id, {"status": "cancelled", "error": "Task cancelled before start"})
         return {"status": "cancelled", "error": "Task cancelled before start"}
 
-    prompt = payload.get("prompt", "")
+    source_job_id = payload.get("source_job_id", "")
+    instruction = payload.get("instruction", "")
     profile_name = payload.get("profile_name", "python")
-    contract_code = payload.get("contract_code", "")
-    deps_cache_tag = payload.get("deps_cache_tag") or None
     workspace_dir = str(WORKSPACE_ROOT / job_id)
 
     progress_count = 0
-    last_progress = {}
 
     async def progress_callback(update: dict):
-        nonlocal progress_count, last_progress
+        nonlocal progress_count
         progress_count += 1
-        last_progress = update
-        # Throttle progress posts to avoid spamming the backbone.
-        if progress_count % 3 == 0 or update.get("current_node") in (
-            "sandbox_arbiter",
-        ):
+        if progress_count % 3 == 0 or update.get("current_node") in ("verify",):
             await _post_progress(job_id, update)
 
     async def cancellation_check() -> bool:
         return await _is_cancelled(job_id)
 
     try:
-        result = await run_swarm_task(
+        result = await run_edit_task(
             task_id=job_id,
-            prompt=prompt,
+            source_job_id=source_job_id,
+            instruction=instruction,
             workspace_dir=workspace_dir,
             profile_name=profile_name,
             progress_callback=progress_callback,
             is_cancelled=cancellation_check,
-            contract_code=contract_code,
-            deps_cache_tag=deps_cache_tag,
         )
     except asyncio.CancelledError:
         await _finalize(job_id, {"status": "cancelled", "error": "Worker job cancelled"})
@@ -153,7 +139,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
 class WorkerSettings:
     functions = [run_job]
     redis_settings = _redis_settings()
-    queue_name = "arq:queue"
+    queue_name = "arq:queue:editing"
     max_jobs = WORKER_CONCURRENCY
     keep_result = 3600
     result_ttl = 3600

@@ -25,8 +25,9 @@ services:
     container_name: mupin_api_backbone
     restart: always
     ports:
-      - "8001:8000"
+      - "${BACKBONE_PORT:-8001}:8000"
     env_file:
+      - ./.env
       - ./mupin-api-backbone/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://mupin:mupin@postgres:5432/mupin
@@ -46,6 +47,7 @@ services:
     restart: always
     command: ["bash", "/app/scripts/worker-entrypoint.sh"]
     env_file:
+      - ./.env
       - ./mupin-coding-module/.env
     environment:
       BACKBONE_URL: http://mupin-api-backbone:8000
@@ -86,8 +88,9 @@ services:
     container_name: mupin_coding_api
     restart: always
     ports:
-      - "8000:8000"
+      - "${CODING_API_PORT:-8000}:8000"
     env_file:
+      - ./.env
       - ./mupin-coding-module/.env
     environment:
       BACKBONE_URL: http://mupin-api-backbone:8000
@@ -102,6 +105,59 @@ services:
     depends_on:
       - mupin-api-backbone
       - mupin-coding-worker
+
+  mupin-editing-worker:
+    build:
+      context: ./mupin-editing-module
+    container_name: mupin_editing_worker
+    restart: always
+    command: ["bash", "/app/scripts/worker-entrypoint.sh"]
+    env_file:
+      - ./.env
+      - ./mupin-editing-module/.env
+    environment:
+      BACKBONE_URL: http://mupin-api-backbone:8000
+      REDIS_URL: redis://redis:6379/0
+      WORKER_MAX_JOBS: "4"
+      WORKSPACE_ROOT: /app/.workspaces
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mupin-coding-module/.workspaces:/app/.workspaces
+      - ./mupin-editing-module/src:/app/src:ro
+      - ./mupin-editing-module/llm_config.yaml:/app/llm_config.yaml:ro
+      - ./mupin-editing-module/profiles:/app/profiles:ro
+      - /etc/resolv.conf:/host-resolv.conf:ro
+    depends_on:
+      - redis
+      - postgres
+      - mupin-api-backbone
+
+  mupin-editing-api:
+    build:
+      context: ./mupin-editing-module
+    container_name: mupin_editing_api
+    restart: always
+    ports:
+      - "${EDITING_API_PORT:-8003}:8000"
+    env_file:
+      - ./.env
+      - ./mupin-editing-module/.env
+    environment:
+      BACKBONE_URL: http://mupin-api-backbone:8000
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mupin-coding-module/.workspaces:/app/.workspaces
+      - ./mupin-editing-module/src:/app/src:ro
+      - ./mupin-editing-module/llm_config.yaml:/app/llm_config.yaml:ro
+      - ./mupin-editing-module/profiles:/app/profiles:ro
+      - /etc/resolv.conf:/host-resolv.conf:ro
+    depends_on:
+      - mupin-api-backbone
+      - mupin-editing-worker
 
 volumes:
   backbone_pg_data:

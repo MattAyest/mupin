@@ -1,8 +1,7 @@
-"""FastAPI layer for the v0.3 coding module.
+"""FastAPI layer for the v0.1 editing module.
 
-In v0.3 this becomes a thin dev-convenience proxy. All real task execution is
-offloaded to the Mupin API Backbone via ARQ. The local endpoints keep the same
-contract as before so existing clients and benchmarks can opt-in gradually.
+Thin dev-convenience proxy. All real task execution is offloaded to the
+Mupin API Backbone via ARQ.
 """
 
 import os
@@ -22,15 +21,15 @@ load_env_hierarchy()
 
 BACKBONE_URL = os.environ.get("BACKBONE_URL", "http://mupin-api-backbone:8000")
 
-app = FastAPI(title="Coding Module Microservice — v0.3 (dev proxy + backbone aliases)")
+app = FastAPI(title="Editing Module Microservice — v0.1 (dev proxy + backbone aliases)")
 
-# Surface misconfigured LLM nodes at startup.
 for _node, _err in validate_config():
     print(f"[config] {_node}: {_err}")
 
 
-class TaskRequest(BaseModel):
-    prompt: str
+class EditRequest(BaseModel):
+    source_job_id: str
+    instruction: str
     language: str | None = "python"
 
 
@@ -47,7 +46,6 @@ class TaskStatusResponse(BaseModel):
     node_history: list[Dict[str, Any]] = []
     llm_usage: list[Dict[str, Any]] = []
     docker_runs: list[Dict[str, Any]] = []
-    classifier_history: list[Dict[str, Any]] = []
 
 
 class JobSubmit(BaseModel):
@@ -56,7 +54,6 @@ class JobSubmit(BaseModel):
 
 
 def _map_job_to_task(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Backbone job shape is a superset of the legacy task response."""
     progress = job.get("progress") or {}
     return {
         "task_id": job["job_id"],
@@ -71,21 +68,21 @@ def _map_job_to_task(job: Dict[str, Any]) -> Dict[str, Any]:
         "node_history": [],
         "llm_usage": [],
         "docker_runs": [],
-        "classifier_history": [],
     }
 
 
-@app.post("/task", response_model=TaskStatusResponse)
-async def generate_code(request: TaskRequest):
-    """Submit a code generation prompt to the backbone and return immediately."""
+@app.post("/edit", response_model=TaskStatusResponse)
+async def edit_code(request: EditRequest):
+    """Submit an editing prompt to the backbone and return immediately."""
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
                 f"{BACKBONE_URL}/jobs",
                 json={
-                    "job_type": "coding",
+                    "job_type": "editing",
                     "payload": {
-                        "prompt": request.prompt,
+                        "source_job_id": request.source_job_id,
+                        "instruction": request.instruction,
                         "profile_name": request.language or "python",
                     },
                 },
@@ -99,7 +96,7 @@ async def generate_code(request: TaskRequest):
             raise HTTPException(status_code=503, detail=f"Backbone unavailable: {e}")
 
 
-@app.post("/task/{task_id}/cancel", response_model=TaskStatusResponse)
+@app.post("/edit/{task_id}/cancel", response_model=TaskStatusResponse)
 async def cancel_task(task_id: str):
     async with httpx.AsyncClient() as client:
         try:
@@ -112,7 +109,7 @@ async def cancel_task(task_id: str):
             raise HTTPException(status_code=503, detail=f"Backbone unavailable: {e}")
 
 
-@app.get("/task/{task_id}", response_model=TaskStatusResponse)
+@app.get("/edit/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str):
     async with httpx.AsyncClient() as client:
         try:
@@ -127,8 +124,7 @@ async def get_task_status(task_id: str):
             raise HTTPException(status_code=503, detail=f"Backbone unavailable: {e}")
 
 
-# -----------------------------------------------------------------------------
-# Backbone-compatible endpoints so the same client code works on either port.
+# -----------------------------------------------------------------------------# Backbone-compatible endpoints so the same client code works on either port.
 # -----------------------------------------------------------------------------
 
 @app.post("/jobs")
@@ -180,7 +176,7 @@ async def proxy_get_job_log(job_id: str):
     return log_path.read_text(encoding="utf-8")
 
 
-@app.get("/task/{task_id}/log", response_class=PlainTextResponse)
+@app.get("/edit/{task_id}/log", response_class=PlainTextResponse)
 async def get_task_log(task_id: str):
     log_path = Path(f".workspaces/{task_id}/task.log")
     if not log_path.exists():

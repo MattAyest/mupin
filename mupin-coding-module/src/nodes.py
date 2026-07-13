@@ -57,9 +57,9 @@ class LLMUnavailableError(Exception):
 # =============================================================================
 # Configuration loading
 # =============================================================================
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "llm_config.yaml")
-with open(CONFIG_PATH, "r") as f:
-    CONFIG = yaml.safe_load(f)
+from .config_loader import load_llm_config
+
+CONFIG = load_llm_config()
 
 OLLAMA_CLOUD_HOST = "https://ollama.com"
 # Per-call timeout for Ollama providers.  This is intentionally generous
@@ -82,7 +82,7 @@ INFRA_BACKOFFS = [
 STREAM_IDLE_DEFAULT = float(RESILIENCE.get("stream_idle_seconds", 120.0))
 
 # HTTP status codes and error names that we treat as transient provider faults.
-TRANSIENT_HTTP_STATUSES = {502, 503, 504, 524}
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504, 524}
 TRANSIENT_ERROR_NAMES = {
     "ReadTimeout",
     "ConnectTimeout",
@@ -272,26 +272,42 @@ def _is_transient_llm_error(e: Exception) -> bool:
     """Return True if an exception looks like a transient provider fault."""
     if isinstance(e, FutureTimeoutError):
         return True
-    # Unwrap langchain / httpx / requests wrapper exceptions.
-    inner = getattr(e, "__cause__", None) or e
-    err_name = type(inner).__name__
-    err_text = f"{err_name}: {inner}"
-    if err_name in TRANSIENT_ERROR_NAMES:
-        return True
-    # Common substring indicators (English + some provider-specific text).
-    lowered = err_text.lower()
-    if any(tok in lowered for tok in (
-        "timeout", "timed out", "temporarily unavailable", "rate limit",
-        "try again", "server error", "bad gateway", "gateway timeout",
-        "origin_response_timeout",
-    )):
-        return True
-    # Extract HTTP status code from the text if present.
-    import re as _re
-    for m in _re.finditer(r"\b(\d{3})\b", err_text):
-        status = int(m.group(1))
-        if status in TRANSIENT_HTTP_STATUSES or (500 <= status < 600):
+    # Walk the full __cause__ chain — langchain/httpx/requests wrap errors
+    # multiple levels deep (e.g. httpx.ReadError → ssl.SSLEOFError).
+    candidates = [e]
+    seen = set()
+    cur = e
+    while True:
+        inner = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        if inner is None or id(inner) in seen:
+            break
+        seen.add(id(inner))
+        candidates.append(inner)
+        cur = inner
+
+    for inner in candidates:
+        err_name = type(inner).__name__
+        err_text = f"{err_name}: {inner}"
+        if err_name in TRANSIENT_ERROR_NAMES:
             return True
+        # Common substring indicators (English + some provider-specific text).
+        lowered = err_text.lower()
+        if any(tok in lowered for tok in (
+            "timeout", "timed out", "temporarily unavailable", "rate limit",
+            "try again", "server error", "bad gateway", "gateway timeout",
+            "origin_response_timeout",
+            "ssl", "unexpected_eof", "eof occurred", "violation of protocol",
+            "incomplete read", "chunked encoding", "connection reset",
+            "remote disconnected", "protocol error", "empty response",
+            "too many concurrent requests",
+        )):
+            return True
+        # Extract HTTP status code from the text if present.
+        import re as _re
+        for m in _re.finditer(r"\b(\d{3})\b", err_text):
+            status = int(m.group(1))
+            if status in TRANSIENT_HTTP_STATUSES or (500 <= status < 600):
+                return True
     return False
 
 

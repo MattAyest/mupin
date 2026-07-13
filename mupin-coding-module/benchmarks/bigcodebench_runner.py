@@ -71,9 +71,10 @@ WORKSPACE_ROOT = Path(__file__).resolve().parent.parent / ".workspaces"
 POLL_INTERVAL = 5          # seconds between status polls
 PER_Q_TIMEOUT = 3600      # 1h per question, measured from worker start (started_at).
                            # BigCodeBench-Hard tasks are complex; 1h gives headroom.
-QUEUE_GRACE = 600          # seconds to wait for the worker to pick up a submitted
+QUEUE_GRACE = 1800         # seconds to wait for the worker to pick up a submitted
                            # job (i.e. for `started_at` to appear). Safety net for a
-                           # dead/sick backbone, NOT a queue-wait cap.
+                           # dead/sick backbone, NOT a queue-wait cap. Raised from 600
+                           # after bcb_r9 lost 30/148 tasks to queue_timeout under load.
 DEFAULT_BATCH_SIZE = 6      # matches WORKER_MAX_JOBS
 
 # Scoring container: the official BigCodeBench evaluate image has all 148 tasks'

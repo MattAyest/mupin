@@ -1,0 +1,122 @@
+[
+  {
+    "id": "fibonacci_docstring",
+    "source_id": "fibonacci",
+    "difficulty": "easy",
+    "instruction": "Add concise docstrings to every public function in src/main.py describing what it does, its parameters, and its return value."
+  },
+  {
+    "id": "stack_type_hints",
+    "source_id": "stack",
+    "difficulty": "easy",
+    "instruction": "Add type hints to all method signatures in src/main.py, including the Stack class and any internal helpers. Do not change behavior."
+  },
+  {
+    "id": "merge_sorted_validation",
+    "source_id": "merge_sorted",
+    "difficulty": "easy",
+    "instruction": "Add input validation that raises TypeError if either argument is not a list, and add a test for it."
+  },
+  {
+    "id": "calculator_logging",
+    "source_id": "calculator",
+    "difficulty": "medium",
+    "instruction": "Log each evaluated expression and its result to stdout using Python's logging module at INFO level, and add a test that checks the logged output."
+  },
+  {
+    "id": "word_frequency_casefold",
+    "source_id": "word_frequency",
+    "difficulty": "medium",
+    "instruction": "Refactor src/main.py to use str.casefold() instead of lower() for case normalization, and add a test verifying it handles the Turkish dotless i correctly."
+  },
+  {
+    "id": "csv_parse_iterative",
+    "source_id": "csv_parse",
+    "difficulty": "medium",
+    "instruction": "Refactor the CSV parser in src/main.py to use a single pass over the input string without calling splitlines(), and ensure all existing tests still pass."
+  },
+  {
+    "id": "graph_method_rename",
+    "source_id": "graph",
+    "difficulty": "medium",
+    "instruction": "Rename the method add_edge(u, v) to connect(u, v) throughout src/main.py and tests/test_main.py, preserving all behavior."
+  },
+  {
+    "id": "evaluator_power_operator",
+    "source_id": "evaluator",
+    "difficulty": "medium",
+    "instruction": "Replace the '**' operator support with a '^' operator that has the same precedence and right-associativity, and update the tests accordingly."
+  },
+  {
+    "id": "token_bucket_str_repr",
+    "source_id": "token_bucket",
+    "difficulty": "medium",
+    "instruction": "Add a __repr__ method to TokenBucket that shows capacity, refill_rate, and current tokens, and add a test for it."
+  },
+  {
+    "id": "min_heap_iteration",
+    "source_id": "min_heap",
+    "difficulty": "medium",
+    "instruction": "Add an __iter__ method to MinHeap that yields items in non-decreasing order without modifying the heap, and add tests."
+  },
+  {
+    "id": "bounded_queue_timeout",
+    "source_id": "bounded_queue",
+    "difficulty": "hard",
+    "instruction": "Add optional timeout parameters to put(item, timeout=None) and get(timeout=None) that raise queue.Full or queue.Empty on timeout, and add tests."
+  },
+  {
+    "id": "rle_bytes_support",
+    "source_id": "rle",
+    "difficulty": "hard",
+    "instruction": "Extend rle_encode and rle_decode to also accept and return bytes when the input is bytes, while keeping str support unchanged. Add tests for bytes round-tripping."
+  },
+  {
+    "id": "make_palindrome_recursive",
+    "source_id": "make_palindrome",
+    "difficulty": "hard",
+    "instruction": "Rewrite the make_palindrome implementation to use a clean recursive helper instead of the current algorithm, and ensure all tests still pass."
+  },
+  {
+    "id": "decode_cyclic_group_size",
+    "source_id": "decode_cyclic",
+    "difficulty": "hard",
+    "instruction": "Generalize encode_cyclic and decode_cyclic to accept a group_size parameter (default 3) and correctly cycle/decode groups of any positive size. Update and add tests."
+  },
+  {
+    "id": "triples_sum_to_zero_indices",
+    "source_id": "triples_sum_to_zero",
+    "difficulty": "hard",
+    "instruction": "Change triples_sum_to_zero to return the actual sorted tuple of three indices whose values sum to zero, or None if no such triple exists. Update tests."
+  },
+  {
+    "id": "smallest_change_memoization",
+    "source_id": "smallest_change",
+    "difficulty": "hard",
+    "instruction": "Rewrite smallest_change using dynamic programming with memoization instead of the current approach, keeping the same public signature and test results."
+  },
+  {
+    "id": "closest_integer_enum",
+    "source_id": "closest_integer",
+    "difficulty": "hard",
+    "instruction": "Refactor closest_integer to use the decimal module for parsing and rounding instead of float(), ensuring the tie-breaking rule still works. Add tests with very long decimal strings."
+  },
+  {
+    "id": "get_row_spiral_order",
+    "source_id": "get_row",
+    "difficulty": "hard",
+    "instruction": "Add a new function get_spiral_order(grid: list[list[int]]) -> list[int] that returns elements in clockwise spiral order, plus tests. Keep get_row unchanged."
+  },
+  {
+    "id": "sort_array_inplace",
+    "source_id": "sort_array",
+    "difficulty": "hard",
+    "instruction": "Change sort_array to sort the input list in place and return None, and update the tests to call it with a copy and assert the original is mutated."
+  },
+  {
+    "id": "largest_prime_digit_sum_top_n",
+    "source_id": "largest_prime_digit_sum",
+    "difficulty": "hard",
+    "instruction": "Extend the module with a new function top_n_prime_digit_sums(numbers: list[int], n: int) -> list[int] that returns the digit sums of the top n largest primes in descending order. Add tests."
+  }
+]

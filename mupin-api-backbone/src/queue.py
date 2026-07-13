@@ -5,6 +5,16 @@ from arq.jobs import Job as ArqJob
 from src.config import REDIS_URL
 
 
+# Map job types to dedicated ARQ queues. This keeps the coding and editing
+# workers from stealing each other's jobs when both register a function named
+# run_job.
+DEFAULT_QUEUE = "arq:queue"
+JOB_TYPE_QUEUES = {
+    "coding": DEFAULT_QUEUE,
+    "editing": "arq:queue:editing",
+}
+
+
 def _redis_settings_from_url(url: str) -> RedisSettings:
     # Supports redis://host:port/db or redis://host:port/db?password=...
     import urllib.parse
@@ -21,10 +31,12 @@ async def get_redis_pool():
 
 
 async def enqueue_job(pool, job_type: str, job_id: str, payload: dict) -> ArqJob:
+    queue_name = JOB_TYPE_QUEUES.get(job_type, DEFAULT_QUEUE)
     return await pool.enqueue_job(
         "run_job",
         job_type,
         job_id,
         payload,
         _job_id=job_id,
+        _queue_name=queue_name,
     )
