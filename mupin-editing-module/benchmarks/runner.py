@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Benchmark runner for the Editing Module (20-question suite).
+"""Benchmark runner for the Editing Module (100-question suite, fixture-based).
 
-Two-phase execution:
-  1. Generate a base coding workspace for every source_id (or reuse cached base jobs).
-  2. Submit an editing job against each base workspace with the specified instruction.
+Loads static fixture workspaces from benchmarks/fixtures/<source>/ and submits
+editing jobs with inline source_files — fully decoupled from the coding module.
 
 Usage:
-    python benchmarks/runner.py                          # run all 20 edits
-    python benchmarks/runner.py --ids fibonacci_docstring stack_type_hints
-    python benchmarks/runner.py --reuse-base             # reuse already-generated base jobs from previous run
-    python benchmarks/runner.py --batch-size 4           # cap concurrent submissions
-    python benchmarks/runner.py --base-batch-size 6      # cap concurrent base coding jobs
-    python benchmarks/runner.py --per-q-timeout 1800     # per-edit timeout
-    python benchmarks/runner.py --summary                # print history
+    python benchmarks/runner.py                          # run all 100 edits
+    python benchmarks/runner.py --ids fibonacci_docstring stack_docstring
+    python benchmarks/runner.py --category documentation  # run one category
+    python benchmarks/runner.py --batch-size 4            # cap concurrent submissions
+    python benchmarks/runner.py --per-q-timeout 1800      # per-edit timeout
+    python benchmarks/runner.py --summary                  # print history
+    python benchmarks/runner.py --diagnostics             # token/time breakdown
 
 Results are appended to benchmarks/results.jsonl (one row per edit).
 """
@@ -23,7 +22,6 @@ import os
 import sys
 import time
 import threading
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,48 +29,55 @@ from pathlib import Path
 import requests
 
 BASE_URL = os.environ.get("MUPIN_BACKBONE_URL", os.environ.get("EDIT_MODULE_URL", "http://localhost:8001"))
-CODING_QUESTIONS_FILE = Path(__file__).parent.parent.parent / "mupin-coding-module" / "benchmarks" / "questions.json"
-EDIT_QUESTIONS_FILE = Path(__file__).parent / "questions.json"
+QUESTIONS_FILE = Path(__file__).parent / "questions_100.json"
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 RESULTS_FILE = Path(__file__).parent / "results.jsonl"
 METRICS_FILE = Path(__file__).parent / "metrics.jsonl"
-BASE_JOBS_FILE = Path(__file__).parent / "base_jobs.json"
 
 POLL_INTERVAL = 5
-PER_Q_TIMEOUT = 1800      # per edit job, measured from worker start
-BASE_PER_Q_TIMEOUT = 3600  # per base coding job
+PER_Q_TIMEOUT = 1800
 QUEUE_GRACE = 600
 DEFAULT_BATCH_SIZE = 6
-DEFAULT_BASE_BATCH_SIZE = 6
+
+FIXTURE_FILES = {"src/main.py", "src/__init__.py", "tests/test_main.py", "tests/__init__.py"}
 
 
-def load_edit_questions(ids=None):
-    with open(EDIT_QUESTIONS_FILE) as f:
+def load_questions(ids=None, category=None):
+    with open(QUESTIONS_FILE) as f:
         questions = json.load(f)
     if ids:
         questions = [q for q in questions if q["id"] in ids]
+    if category:
+        questions = [q for q in questions if q["category"] == category]
     return questions
 
 
-def load_coding_questions():
-    with open(CODING_QUESTIONS_FILE) as f:
-        return json.load(f)
+def load_fixture_files(source: str) -> dict[str, str]:
+    fixture_path = FIXTURES_DIR / source
+    if not fixture_path.exists():
+        raise FileNotFoundError(f"Fixture not found: {fixture_path}")
+    files = {}
+    for relpath in FIXTURE_FILES:
+        filepath = fixture_path / relpath
+        if filepath.exists():
+            files[relpath] = filepath.read_text(encoding="utf-8")
+    if "src/main.py" not in files:
+        raise FileNotFoundError(f"Fixture {source} missing src/main.py")
+    return files
 
 
-def submit_coding_job(prompt: str) -> str:
+def submit_edit_job(source_files: dict, instruction: str) -> str:
     resp = requests.post(
         f"{BASE_URL}/jobs",
-        json={"job_type": "coding", "payload": {"prompt": prompt, "profile_name": "python"}},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()["job_id"]
-
-
-def submit_edit_job(source_job_id: str, instruction: str) -> str:
-    resp = requests.post(
-        f"{BASE_URL}/jobs",
-        json={"job_type": "editing", "payload": {"source_job_id": source_job_id, "instruction": instruction, "profile_name": "python"}},
-        timeout=10,
+        json={
+            "job_type": "editing",
+            "payload": {
+                "source_files": source_files,
+                "instruction": instruction,
+                "profile_name": "python",
+            },
+        },
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()["job_id"]
@@ -101,7 +106,7 @@ def _started_at_from_job(data: dict) -> datetime | None:
     return None
 
 
-def _wait_for_job(job_id: str, qid: str, per_q_timeout: int, prefix: str) -> dict:
+def _wait_for_job(job_id: str, qid: str, per_q_timeout: int) -> dict:
     submit_time = time.time()
     submit_iso = datetime.now(timezone.utc).isoformat()
     deadline = None
@@ -136,7 +141,7 @@ def _wait_for_job(job_id: str, qid: str, per_q_timeout: int, prefix: str) -> dic
             data = poll_job(job_id)
             last_data = data
         except Exception as e:
-            print(f"  [{prefix}{qid}] poll_error: {e} — retrying in {POLL_INTERVAL}s")
+            print(f"  [{qid}] poll_error: {e} — retrying in {POLL_INTERVAL}s")
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -144,23 +149,20 @@ def _wait_for_job(job_id: str, qid: str, per_q_timeout: int, prefix: str) -> dic
         node = data.get("current_node")
 
         if deadline is None and data.get("started_at"):
-            try:
-                started_dt = _started_at_from_job(data)
-                if started_dt:
-                    deadline = started_dt.timestamp() + per_q_timeout
-            except Exception:
-                deadline = submit_time + per_q_timeout
+            started_dt = _started_at_from_job(data)
+            if started_dt:
+                deadline = started_dt.timestamp() + per_q_timeout
 
         if node != last_node:
             last_node = node
-            print(f"  [{prefix}{qid}] {time.time() - submit_time:>7.1f}s -> {node}  (sbox={data.get('sandbox_loop_count', 0)})")
+            print(f"  [{qid}] {time.time() - submit_time:>7.1f}s -> {node}  (sbox={data.get('sandbox_loop_count', 0)})")
 
         if status in ("completed", "failed", "cancelled", "exhausted", "infra_exhausted"):
             started_at = _started_at_from_job(data)
             queue_wait = round(max(0.0, started_at.timestamp() - submit_time), 1) if started_at else 0.0
             process = round(max(0.0, time.time() - (started_at.timestamp() if started_at else submit_time)), 1)
             print(
-                f"\n  [{prefix}{qid}] {status.upper()} in {round(time.time() - submit_time, 1)}s  |  "
+                f"\n  [{qid}] {status.upper()} in {round(time.time() - submit_time, 1)}s  |  "
                 f"queue={queue_wait:.1f}s  process={process:.1f}s  |  "
                 f"sbox={data.get('sandbox_loop_count', 0)}"
             )
@@ -184,89 +186,28 @@ def _wait_for_job(job_id: str, qid: str, per_q_timeout: int, prefix: str) -> dic
         time.sleep(POLL_INTERVAL)
 
 
-def _generate_base_jobs(questions: list[dict], batch_size: int, per_q_timeout: int) -> dict[str, str]:
-    """Generate one base coding job per unique source_id. Returns source_id->job_id."""
-    coding_by_id = {q["id"]: q for q in load_coding_questions()}
-    source_ids = sorted({q["source_id"] for q in questions})
-    base_jobs: dict[str, str] = {}
-    lock = threading.Lock()
-
-    def worker_loop():
-        while True:
-            with lock:
-                try:
-                    sid = next(iter_source_ids)
-                except StopIteration:
-                    return
-            cq = coding_by_id.get(sid)
-            if not cq:
-                print(f"  [base {sid}] missing source coding question")
-                with lock:
-                    base_jobs[sid] = None
-                return
-            job_id = submit_coding_job(cq["prompt"])
-            print(f"  [base {sid}] submitted {job_id}")
-            result = _wait_for_job(job_id, sid, per_q_timeout, "base ")
-            with lock:
-                base_jobs[sid] = job_id if result["status"] == "completed" else None
-
-    iter_source_ids = iter(source_ids)
-    with ThreadPoolExecutor(max_workers=batch_size) as executor:
-        futures = [executor.submit(worker_loop) for _ in range(batch_size)]
-        for f in as_completed(futures):
-            f.result()
-
-    return base_jobs
-
-
-def _load_cached_base_jobs() -> dict[str, str]:
-    if BASE_JOBS_FILE.exists():
-        with open(BASE_JOBS_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_base_jobs(base_jobs: dict[str, str]) -> None:
-    with open(BASE_JOBS_FILE, "w") as f:
-        json.dump(base_jobs, f, indent=2)
-
-
 def run_edit_benchmark(
     questions: list[dict],
     run_id: str,
     batch_size: int,
-    base_batch_size: int,
     per_q_timeout: int,
-    base_per_q_timeout: int,
-    reuse_base: bool,
 ) -> list[dict]:
     run_start = time.time()
     print(f"\nEditing benchmark run: {run_id}")
-    print(f"  Edit questions:   {len(questions)}")
-    print(f"  API:              {BASE_URL}")
-    print(f"  Edit concurrency: {batch_size} (slot-based)")
-    print(f"  Base concurrency: {base_batch_size} (slot-based)")
+    print(f"  Questions:    {len(questions)}")
+    print(f"  API:          {BASE_URL}")
+    print(f"  Concurrency:  {batch_size} (slot-based)")
+    print(f"  Per-job cap:  {per_q_timeout}s (from worker start)")
+    print(f"  Fixtures:     {FIXTURES_DIR}")
 
-    # Phase 1: ensure base jobs exist.
-    if reuse_base:
-        base_jobs = _load_cached_base_jobs()
-        print(f"  Reusing {len(base_jobs)} cached base jobs")
-    else:
-        base_jobs = _generate_base_jobs(questions, base_batch_size, base_per_q_timeout)
-        _save_base_jobs(base_jobs)
-        print(f"  Generated base jobs for {len(base_jobs)} source questions")
+    # Pre-load all fixture files to avoid repeated disk reads.
+    fixture_cache: dict[str, dict[str, str]] = {}
+    for q in questions:
+        src = q["source"]
+        if src not in fixture_cache:
+            fixture_cache[src] = load_fixture_files(src)
+    print(f"  Loaded {len(fixture_cache)} fixtures")
 
-    missing_base = sorted({q["source_id"] for q in questions} - set(base_jobs.keys()))
-    if missing_base:
-        print(f"  Missing base jobs for: {missing_base}")
-        sys.exit(1)
-
-    failed_base = [sid for sid, jid in base_jobs.items() if jid is None]
-    if failed_base:
-        print(f"  Base generation failed for: {failed_base}")
-        # Allow continuing; edits for these will fail fast.
-
-    # Phase 2: submit edits.
     results: list[dict] = []
     results_lock = threading.Lock()
     done_count = [0]
@@ -280,37 +221,43 @@ def run_edit_benchmark(
                 except StopIteration:
                     return
             qid = question["id"]
-            sid = question["source_id"]
-            base_id = base_jobs.get(sid)
-            if not base_id:
+            src = question["source"]
+            source_files = fixture_cache.get(src, {})
+
+            if not source_files:
                 result = {
                     "run_id": run_id,
                     "question_id": qid,
-                    "source_id": sid,
+                    "source": src,
+                    "category": question["category"],
                     "difficulty": question["difficulty"],
                     "instruction": question["instruction"],
-                    "base_job_id": base_id,
                     "edit_job_id": None,
-                    "status": "base_failed",
-                    "error": "Base coding job failed or missing",
+                    "status": "fixture_missing",
+                    "error": f"Fixture not found for {src}",
                     "start_time": datetime.now(timezone.utc).isoformat(),
                     "end_time": datetime.now(timezone.utc).isoformat(),
                     "elapsed_seconds": 0.0,
+                    "queue_wait_seconds": 0.0,
+                    "processing_seconds": 0.0,
                     "sandbox_loop_count": 0,
                     "diff_present": False,
+                    "node_history": [],
+                    "llm_usage": [],
+                    "docker_runs": [],
                 }
             else:
-                print(f"\n  [{qid}] source={sid} base={base_id}")
-                edit_id = submit_edit_job(base_id, question["instruction"])
+                print(f"\n  [{qid}] source={src} category={question['category']}")
+                edit_id = submit_edit_job(source_files, question["instruction"])
                 print(f"  [{qid}] edit submitted {edit_id}")
-                edit_result = _wait_for_job(edit_id, qid, per_q_timeout, "")
+                edit_result = _wait_for_job(edit_id, qid, per_q_timeout)
                 result = {
                     "run_id": run_id,
                     "question_id": qid,
-                    "source_id": sid,
+                    "source": src,
+                    "category": question["category"],
                     "difficulty": question["difficulty"],
                     "instruction": question["instruction"],
-                    "base_job_id": base_id,
                     "edit_job_id": edit_id,
                     "status": edit_result["status"],
                     "error": edit_result.get("error"),
@@ -373,27 +320,30 @@ def _metrics_rows(run_id: str, qid: str, result: dict) -> list[dict]:
 def print_summary(results: list[dict]):
     if not results:
         return
-    print(f"\n{'═' * 90}")
+    print(f"\n{'═' * 100}")
     print(f"  EDIT RUN SUMMARY  ({results[0]['run_id']})")
-    print(f"{'═' * 90}")
+    print(f"{'═' * 100}")
     print(
-        f"  {'ID':<28} {'DIFF':<8} {'STATUS':<10} {'TOTAL':>8}  "
+        f"  {'ID':<28} {'CAT':<14} {'STATUS':<10} {'TOTAL':>8}  "
         f"{'QUEUE':>8}  {'PROCESS':>8}  {'SBOX':>4}  {'DIFF':>5}"
     )
-    print(f"  {'─'*28} {'─'*8} {'─'*10} {'─'*8}  {'─'*8}  {'─'*8}  {'─'*4}  {'─'*5}")
+    print(f"  {'─'*28} {'─'*14} {'─'*10} {'─'*8}  {'─'*8}  {'─'*8}  {'─'*4}  {'─'*5}")
     total_elapsed = 0
     total_queue = 0.0
     total_process = 0.0
     passed = 0
+    diff_count = 0
     for r in results:
         verdict = "PASS" if r["status"] == "completed" else "FAIL"
         if verdict == "PASS":
             passed += 1
+        if r.get("diff_present"):
+            diff_count += 1
         total_elapsed += r["elapsed_seconds"]
         total_queue += r.get("queue_wait_seconds", 0.0)
         total_process += r.get("processing_seconds", r["elapsed_seconds"])
         print(
-            f"  {r['question_id']:<28} {r['difficulty']:<8} {verdict:<10} "
+            f"  {r['question_id']:<28} {r['category']:<14} {verdict:<10} "
             f"{r['elapsed_seconds']:>7.1f}s  "
             f"{r.get('queue_wait_seconds', 0.0):>7.1f}s  "
             f"{r.get('processing_seconds', r['elapsed_seconds']):>7.1f}s  "
@@ -401,14 +351,34 @@ def print_summary(results: list[dict]):
             f"{'yes' if r.get('diff_present') else 'no':>5}"
         )
     n = len(results)
-    print(f"{'─' * 90}")
+    print(f"{'─' * 100}")
     print(
-        f"  {passed}/{n} passed   total: {total_elapsed:.1f}s   "
+        f"  {passed}/{n} passed   diff_present: {diff_count}/{n}   "
+        f"total: {total_elapsed:.1f}s   "
         f"queue: {total_queue:.1f}s ({100*total_queue/total_elapsed:.1f}%)   "
         f"process: {total_process:.1f}s ({100*total_process/total_elapsed:.1f}%)   "
         f"avg: {total_elapsed/n:.1f}s"
     )
-    print(f"{'═' * 90}\n")
+
+    # Per-category breakdown
+    from collections import defaultdict
+    cat_stats = defaultdict(lambda: {"passed": 0, "total": 0, "time": 0.0})
+    for r in results:
+        cat = r["category"]
+        cat_stats[cat]["total"] += 1
+        cat_stats[cat]["time"] += r["elapsed_seconds"]
+        if r["status"] == "completed":
+            cat_stats[cat]["passed"] += 1
+
+    print(f"\n  Per-category:")
+    print(f"  {'CATEGORY':<14} {'PASS':>8} {'AVG_TIME':>8}")
+    print(f"  {'─'*14} {'─'*8} {'─'*8}")
+    for cat in sorted(cat_stats.keys()):
+        s = cat_stats[cat]
+        avg = s["time"] / s["total"] if s["total"] else 0
+        print(f"  {cat:<14} {s['passed']}/{s['total']:<7} {avg:>7.1f}s")
+
+    print(f"{'═' * 100}\n")
 
 
 def print_diagnostics(results: list[dict]):
@@ -438,7 +408,8 @@ def print_diagnostics(results: list[dict]):
         for entry in r.get("llm_usage", []):
             node = entry["node"]
             if node not in node_totals:
-                node_totals[node] = {"calls": 0, "errors": 0, "duration": 0.0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                node_totals[node] = {"calls": 0, "errors": 0, "duration": 0.0,
+                                     "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             node_totals[node]["calls"] += 1
             if entry.get("status") != "success":
                 node_totals[node]["errors"] += 1
@@ -452,10 +423,7 @@ def print_diagnostics(results: list[dict]):
             f"\n  {'NODE':<26} {'CALLS':>5} {'ERRORS':>6} {'TIME':>8} "
             f"{'IN_TOK':>8} {'OUT_TOK':>8} {'TOT_TOK':>8}"
         )
-        print(
-            f"  {'─'*26} {'─'*5} {'─'*6} {'─'*8} "
-            f"{'─'*8} {'─'*8} {'─'*8}"
-        )
+        print(f"  {'─'*26} {'─'*5} {'─'*6} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
         for node, t in sorted(node_totals.items()):
             print(
                 f"  {node:<26} {t['calls']:>5} {t['errors']:>6} {t['duration']:>7.1f}s"
@@ -471,11 +439,7 @@ def print_diagnostics(results: list[dict]):
                 docker_total += val
                 docker_count += 1
     if docker_count:
-        print(
-            f"\n  Docker runs: {docker_count}   "
-            f"total sandbox time: {docker_total:.1f}s   "
-            f"avg: {docker_total/docker_count:.1f}s"
-        )
+        print(f"\n  Docker runs: {docker_count}   total sandbox time: {docker_total:.1f}s   avg: {docker_total/docker_count:.1f}s")
 
     print(f"{'#' * 70}\n")
 
@@ -496,23 +460,18 @@ def print_historical_summary():
         avg_time = sum(r["elapsed_seconds"] for r in results) / total
         label = results[0].get("label") or ""
         label_str = f"  [{label}]" if label else ""
-        print(
-            f"  {run_id}  {ts}  {passed}/{total} passed  "
-            f"avg {avg_time:.1f}s{label_str}"
-        )
+        print(f"  {run_id}  {ts}  {passed}/{total} passed  avg {avg_time:.1f}s{label_str}")
 
 
 def main():
-    global BASE_URL, PER_Q_TIMEOUT, BASE_PER_Q_TIMEOUT
-    parser = argparse.ArgumentParser(description="Editing Module benchmark runner")
-    parser.add_argument("--ids", nargs="+", help="Run only these edit question IDs")
+    global BASE_URL, PER_Q_TIMEOUT
+    parser = argparse.ArgumentParser(description="Editing Module 100-question benchmark runner")
+    parser.add_argument("--ids", nargs="+", help="Run only these question IDs")
+    parser.add_argument("--category", default=None, help="Run only one category (documentation, robustness, feature, refactor, behavior)")
     parser.add_argument("--summary", action="store_true", help="Print history of past runs and exit")
     parser.add_argument("--url", default=None, help="Override API base URL")
     parser.add_argument("--per-q-timeout", type=int, default=None, help=f"Per-edit timeout (default {PER_Q_TIMEOUT})")
-    parser.add_argument("--base-per-q-timeout", type=int, default=None, help=f"Per-base-coding timeout (default {BASE_PER_Q_TIMEOUT})")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help=f"Max concurrent edit jobs (default {DEFAULT_BATCH_SIZE})")
-    parser.add_argument("--base-batch-size", type=int, default=DEFAULT_BASE_BATCH_SIZE, help=f"Max concurrent base coding jobs (default {DEFAULT_BASE_BATCH_SIZE})")
-    parser.add_argument("--reuse-base", action="store_true", help="Reuse cached base job IDs instead of regenerating them")
     parser.add_argument("--diagnostics", action="store_true", help="Print token/time diagnostic summary")
     parser.add_argument("--label", default="", help="Short tag stored on every result row")
     args = parser.parse_args()
@@ -521,16 +480,14 @@ def main():
         BASE_URL = args.url
     if args.per_q_timeout is not None:
         PER_Q_TIMEOUT = args.per_q_timeout
-    if args.base_per_q_timeout is not None:
-        BASE_PER_Q_TIMEOUT = args.base_per_q_timeout
 
     if args.summary:
         print_historical_summary()
         return
 
-    questions = load_edit_questions(args.ids)
+    questions = load_questions(args.ids, args.category)
     if not questions:
-        print("No edit questions matched.")
+        print("No questions matched.")
         sys.exit(1)
 
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -538,10 +495,7 @@ def main():
         questions,
         run_id,
         batch_size=args.batch_size,
-        base_batch_size=args.base_batch_size,
         per_q_timeout=PER_Q_TIMEOUT,
-        base_per_q_timeout=BASE_PER_Q_TIMEOUT,
-        reuse_base=args.reuse_base,
     )
 
     for r in results:

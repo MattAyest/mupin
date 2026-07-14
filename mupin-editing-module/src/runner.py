@@ -84,6 +84,7 @@ async def run_edit_task(
     instruction: str,
     workspace_dir: str,
     profile_name: str,
+    source_files: dict | None = None,
     progress_callback=None,
     is_cancelled=None,
     deadline: float | None = None,
@@ -99,7 +100,8 @@ async def run_edit_task(
 
     initial_state = {
         "task_id": task_id,
-        "source_job_id": source_job_id,
+        "source_job_id": source_job_id or "",
+        "source_files": source_files or {},
         "instruction": instruction,
         "workspace_dir": workspace_dir,
         "profile_name": profile_name,
@@ -160,11 +162,19 @@ async def run_edit_task(
         try:
             profile = get_profile(profile_name)
             from .nodes import load_workspace_manifest
-            workspace_root = Path(workspace_dir).parent
-            source_manifest = load_workspace_manifest(
-                str(workspace_root / source_job_id), profile
-            )
             final_manifest = load_workspace_manifest(workspace_dir, profile)
+
+            # Source manifest: if source_files were provided inline, use those
+            # as the baseline. Otherwise read from the source workspace on disk.
+            if source_files:
+                source_manifest = dict(source_files)
+            elif source_job_id:
+                workspace_root = Path(workspace_dir).parent
+                source_manifest = load_workspace_manifest(
+                    str(workspace_root / source_job_id), profile
+                )
+            else:
+                source_manifest = {}
         except Exception:
             pass
 

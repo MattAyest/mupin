@@ -13,6 +13,7 @@ class EditingState(TypedDict):
     # Task inputs
     # ------------------------------------------------------------------
     source_job_id: str
+    source_files: Dict[str, str]
     instruction: str
     workspace_dir: str
     profile_name: str

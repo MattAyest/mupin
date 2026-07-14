@@ -93,6 +93,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
         return {"status": "cancelled", "error": "Task cancelled before start"}
 
     source_job_id = payload.get("source_job_id", "")
+    source_files = payload.get("source_files")
     instruction = payload.get("instruction", "")
     profile_name = payload.get("profile_name", "python")
     workspace_dir = str(WORKSPACE_ROOT / job_id)
@@ -115,6 +116,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
             instruction=instruction,
             workspace_dir=workspace_dir,
             profile_name=profile_name,
+            source_files=source_files,
             progress_callback=progress_callback,
             is_cancelled=cancellation_check,
         )

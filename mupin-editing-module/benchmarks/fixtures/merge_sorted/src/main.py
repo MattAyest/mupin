@@ -1,0 +1,22 @@
+def merge_sorted(a: list[int], b: list[int]) -> list[int]:
+    result: list[int] = []
+    i, j = 0, 0
+    len_a, len_b = len(a), len(b)
+
+    while i < len_a and j < len_b:
+        if a[i] <= b[j]:
+            result.append(a[i])
+            i += 1
+        else:
+            result.append(b[j])
+            j += 1
+
+    while i < len_a:
+        result.append(a[i])
+        i += 1
+
+    while j < len_b:
+        result.append(b[j])
+        j += 1
+
+    return result

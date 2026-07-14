@@ -28,7 +28,8 @@ for _node, _err in validate_config():
 
 
 class EditRequest(BaseModel):
-    source_job_id: str
+    source_job_id: str | None = None
+    source_files: Dict[str, str] | None = None
     instruction: str
     language: str | None = "python"
 
@@ -74,18 +75,20 @@ def _map_job_to_task(job: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/edit", response_model=TaskStatusResponse)
 async def edit_code(request: EditRequest):
     """Submit an editing prompt to the backbone and return immediately."""
+    if not request.source_job_id and not request.source_files:
+        raise HTTPException(status_code=422, detail="Either source_job_id or source_files must be provided")
+    payload = {
+        "source_job_id": request.source_job_id or "",
+        "instruction": request.instruction,
+        "profile_name": request.language or "python",
+    }
+    if request.source_files:
+        payload["source_files"] = request.source_files
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
                 f"{BACKBONE_URL}/jobs",
-                json={
-                    "job_type": "editing",
-                    "payload": {
-                        "source_job_id": request.source_job_id,
-                        "instruction": request.instruction,
-                        "profile_name": request.language or "python",
-                    },
-                },
+                json={"job_type": "editing", "payload": payload},
                 timeout=10,
             )
             resp.raise_for_status()

@@ -778,32 +778,46 @@ def _parse_plan(content: str) -> List[Dict[str, Any]]:
 # =============================================================================
 @node_with_history
 def load_source(state: EditingState):
-    source_job_id = state["source_job_id"]
-    workspace_root = Path(os.environ.get("WORKSPACE_ROOT", "/app/.workspaces"))
-    source_workspace = str(workspace_root / source_job_id)
     edit_workspace = state["workspace_dir"]
-
     os.makedirs(edit_workspace, exist_ok=True)
-    if os.path.isdir(source_workspace):
-        for item in os.listdir(source_workspace):
-            src = os.path.join(source_workspace, item)
-            dst = os.path.join(edit_workspace, item)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            else:
-                shutil.copy2(src, dst)
+
+    source_job_id = state.get("source_job_id", "")
+    source_files = state.get("source_files") or {}
+
+    if source_files:
+        for filename, content in source_files.items():
+            _write_workspace_file(edit_workspace, filename, content)
+        _diag(edit_workspace, "load_source",
+              f"Loaded {len(source_files)} inline source files")
+    elif source_job_id:
+        workspace_root = Path(os.environ.get("WORKSPACE_ROOT", "/app/.workspaces"))
+        source_workspace = str(workspace_root / source_job_id)
+        if os.path.isdir(source_workspace):
+            for item in os.listdir(source_workspace):
+                src = os.path.join(source_workspace, item)
+                dst = os.path.join(edit_workspace, item)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+        _diag(edit_workspace, "load_source",
+              f"Loaded files from source job {source_job_id}")
+    else:
+        _diag(edit_workspace, "load_source",
+              "No source_files or source_job_id provided")
 
     profile = _profile_from_state(state)
     setup_workspace(edit_workspace, profile)
 
     source_manifest = load_workspace_manifest(edit_workspace, profile)
-    _diag(edit_workspace, "load_source", f"Loaded {len(source_manifest)} files from {source_workspace}")
+    _diag(edit_workspace, "load_source", f"Loaded {len(source_manifest)} files")
 
     return {
         "source_manifest": source_manifest,
         "file_manifest": dict(source_manifest),
         "next_node": "analyze",
-        "thoughts": _think(edit_workspace, "load_source", f"Loaded {len(source_manifest)} files from source job {source_job_id}"),
+        "thoughts": _think(edit_workspace, "load_source",
+                           f"Loaded {len(source_manifest)} files"),
     }
 
 

@@ -135,6 +135,10 @@ prompts:
     <rules>
     - Identify concrete, verifiable changes (e.g., "add a ValueError guard in
       src/main.py", "add a test for empty input in tests/test_main.py").
+    - Always evaluate whether the tests need to change. If the instruction
+      alters behavior, signatures, or interfaces, the existing tests must be
+      updated to match. If the instruction adds new functionality, new tests
+      should be added. Explicitly state if tests do NOT need changes.
     - Note any files that should NOT be modified.
     - Flag ambiguity in the instruction and pick the most likely intent.
     </rules>
@@ -145,6 +149,7 @@ prompts:
       {
         "intent": "one-sentence summary",
         "affected_files": ["src/main.py", "tests/test_main.py"],
+        "test_impact": "none | update_existing | add_new | both",
         "notes": ["any ambiguity or constraints"]
       }
       </analysis>
@@ -168,6 +173,9 @@ prompts:
     - Every plan item must correspond to a single file.
     - Be specific: include function names, line ranges if helpful, and exact
       expected behavior of the result.
+    - If the analysis indicates test impact (update_existing, add_new, or both),
+      the plan MUST include a corresponding step for tests/test_main.py.
+      Describe exactly which tests to update or add.
     - Do not include generic advice; only actionable edits.
     </rules>
 
@@ -221,5 +229,7 @@ prompts:
     Before finishing, verify that:
     - The plan has been fully implemented.
     - No unrelated files were modified.
+    - If the instruction changed behavior or signatures, tests have been
+      updated or added to match the new behavior.
     - Tests remain importable and syntactically valid.
     </quality_check>
