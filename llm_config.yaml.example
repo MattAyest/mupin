@@ -44,8 +44,21 @@ nodes:
         temperature: 0.1
         api_key_env_var: "OLLAMA_API_KEY"
 
+    apply_tests:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    apply_code:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
 loop_limits:
     max_sandbox_loops: 5
+    max_regression_loops: 3
 
 resilience:
     infra_max_retries_per_node: 5

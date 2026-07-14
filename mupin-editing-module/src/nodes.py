@@ -100,7 +100,8 @@ SUPPORTED_PROVIDERS = (
     "openai-compatible",
 )
 
-MAX_SANDBOX_LOOPS = 5
+MAX_SANDBOX_LOOPS = int(CONFIG.get("loop_limits", {}).get("max_sandbox_loops", 5))
+MAX_REGRESSION_LOOPS = int(CONFIG.get("loop_limits", {}).get("max_regression_loops", 3))
 SERVER_TASK_DEADLINE = CONFIG.get("server", {}).get("task_deadline_seconds", 3600)
 
 
@@ -850,13 +851,17 @@ def analyze(state: EditingState):
         return _handle_llm_unavailable("analyze", state, e, workspace)
 
     analysis = _parse_analysis(content)
-    _diag(workspace, "analyze", f"Analysis: {analysis.get('intent', '')}")
+    test_impact = analysis.get("test_impact", "none")
+    if test_impact not in ("none", "update_existing", "add_new", "both"):
+        test_impact = "none"
+    _diag(workspace, "analyze", f"Analysis: {analysis.get('intent', '')} | test_impact: {test_impact}")
 
     return {
+        "test_impact": test_impact,
         "edit_plan": [],
         "llm_usage": llm_usage,
         "next_node": "plan",
-        "thoughts": _think(workspace, "analyze", f"Intent: {analysis.get('intent', 'no analysis')} | affected: {analysis.get('affected_files', [])}"),
+        "thoughts": _think(workspace, "analyze", f"Intent: {analysis.get('intent', 'no analysis')} | test_impact: {test_impact} | affected: {analysis.get('affected_files', [])}"),
     }
 
 
@@ -889,13 +894,18 @@ def plan(state: EditingState):
         return _handle_llm_unavailable("plan", state, e, workspace)
 
     edit_plan = _parse_plan(content)
-    _diag(workspace, "plan", f"Plan: {len(edit_plan)} step(s)")
+    test_impact = state.get("test_impact", "none")
+    _diag(workspace, "plan", f"Plan: {len(edit_plan)} step(s) | test_impact: {test_impact}")
+
+    # Route: if tests are affected, go to apply_tests (TDD: tests first).
+    # Otherwise, go to apply (code-only, tests untouched).
+    next_node = "apply_tests" if test_impact != "none" else "apply"
 
     return {
         "edit_plan": edit_plan,
         "llm_usage": llm_usage,
-        "next_node": "apply",
-        "thoughts": _think(workspace, "plan", f"Planned {len(edit_plan)} edit(s)"),
+        "next_node": next_node,
+        "thoughts": _think(workspace, "plan", f"Planned {len(edit_plan)} edit(s) → {next_node}"),
     }
 
 
@@ -904,11 +914,15 @@ def plan(state: EditingState):
 # =============================================================================
 @node_with_history
 def apply(state: EditingState):
+    """Code-only apply node (used when test_impact=none).
+    Physically ignores any test file output from the LLM.
+    """
     instruction = state["instruction"]
     workspace = state["workspace_dir"]
     manifest = state.get("file_manifest", {})
     edit_plan = state.get("edit_plan", [])
     sandbox_errors = state.get("sandbox_errors", "")
+    regression_errors = state.get("regression_errors", "")
 
     profile = _profile_from_state(state)
     system = profile.prompt("apply_system")
@@ -919,8 +933,10 @@ def apply(state: EditingState):
     )
     plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
     user_prompt = f"Instruction:\n{instruction}\n\nEdit plan:\n{plan_block}\n\nWorkspace files:\n{files_block}"
-    if sandbox_errors:
-        user_prompt += f"\n\nThe last verification failed with these errors. Fix the implementation (and tests if necessary):\n{sandbox_errors[:4000]}"
+    if regression_errors:
+        user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:4000]}\nFix the implementation so existing tests still pass."
+    elif sandbox_errors:
+        user_prompt += f"\n\nThe last verification failed with these errors. Fix the implementation:\n{sandbox_errors[:4000]}"
 
     try:
         content, llm_usage = _invoke_with_retry(
@@ -942,16 +958,395 @@ def apply(state: EditingState):
             "thoughts": _think(workspace, "apply", "ERROR: no file tags produced"),
         }
 
-    # Merge: preserve files not mentioned in the response; overwrite listed files.
-    final_manifest = {**manifest, **new_files}
-    _diag(workspace, "apply", f"Applied edits to: {sorted(new_files.keys())}")
+    # Enforce code-only: filter out any test files the LLM might output.
+    test_main_path = profile.file_path("test_main")
+    code_files = {k: v for k, v in new_files.items() if not k.startswith("tests/")}
+    if len(code_files) < len(new_files):
+        _diag(workspace, "apply", f"Filtered out test files from apply response: {set(new_files) - set(code_files)}")
+
+    if not code_files:
+        _diag(workspace, "apply", "No code files in response after filtering test files")
+        return {
+            "sandbox_errors": "Apply Error: no code files produced",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(workspace, "apply", "ERROR: no code files after filtering"),
+        }
+
+    final_manifest = {**manifest, **code_files}
+    _diag(workspace, "apply", f"Applied edits to: {sorted(code_files.keys())}")
 
     return {
         "file_manifest": final_manifest,
         "sandbox_errors": "",
+        "regression_errors": "",
         "llm_usage": llm_usage,
+        "next_node": "regression_check",
+        "thoughts": _think(workspace, "apply", f"Edited {len(code_files)} file(s): {', '.join(sorted(code_files.keys()))}"),
+    }
+
+
+# =============================================================================
+# NODE: apply_tests (TDD — writes tests FIRST for target behavior)
+# =============================================================================
+@node_with_history
+def apply_tests(state: EditingState):
+    """Writes/updates tests for the TARGET behavior before code is changed.
+    Only outputs tests/test_main.py — cannot touch src/main.py.
+    """
+    instruction = state["instruction"]
+    workspace = state["workspace_dir"]
+    manifest = state.get("file_manifest", {})
+    edit_plan = state.get("edit_plan", [])
+    regression_errors = state.get("regression_errors", "")
+
+    profile = _profile_from_state(state)
+    system = profile.prompt("apply_tests_system")
+
+    source_main_path = profile.file_path("source_main")
+    test_main_path = profile.file_path("test_main")
+    current_code = manifest.get(source_main_path, "")
+    current_tests = manifest.get(test_main_path, "")
+
+    plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
+    user_prompt = (
+        f"Instruction:\n{instruction}\n\n"
+        f"Edit plan:\n{plan_block}\n\n"
+        f"Current code (src/main.py — for context, write tests for TARGET behavior):\n--- src/main.py ---\n{current_code[:4000]}\n\n"
+        f"Current tests (tests/test_main.py — update these):\n--- tests/test_main.py ---\n{current_tests[:4000]}"
+    )
+    if regression_errors:
+        user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:3000]}\nUpdate the tests to correctly reflect the target behavior."
+
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "apply_tests",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+            state=state,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("apply_tests", state, e, workspace)
+
+    new_files = _parse_file_tags(content)
+    if not new_files:
+        _diag(workspace, "apply_tests", f"No <file> tags in response\n{content[:2000]}")
+        return {
+            "sandbox_errors": "Apply_tests Error: no file tags produced",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(workspace, "apply_tests", "ERROR: no file tags produced"),
+        }
+
+    # Enforce tests-only: filter out any code files the LLM might output.
+    test_files = {k: v for k, v in new_files.items() if k.startswith("tests/")}
+    if len(test_files) < len(new_files):
+        _diag(workspace, "apply_tests", f"Filtered out code files from apply_tests response: {set(new_files) - set(test_files)}")
+
+    if not test_files:
+        _diag(workspace, "apply_tests", "No test files in response after filtering")
+        return {
+            "sandbox_errors": "Apply_tests Error: no test files produced",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(workspace, "apply_tests", "ERROR: no test files after filtering"),
+        }
+
+    # Merge test files into manifest — code files are preserved unchanged.
+    final_manifest = {**manifest, **test_files}
+    _diag(workspace, "apply_tests", f"Updated tests: {sorted(test_files.keys())}")
+
+    return {
+        "file_manifest": final_manifest,
+        "sandbox_errors": "",
+        "regression_errors": "",
+        "llm_usage": llm_usage,
+        "next_node": "apply_code",
+        "thoughts": _think(workspace, "apply_tests", f"Wrote tests for target behavior: {', '.join(sorted(test_files.keys()))}"),
+    }
+
+
+# =============================================================================
+# NODE: apply_code (TDD — writes code to pass the new tests)
+# =============================================================================
+@node_with_history
+def apply_code(state: EditingState):
+    """Writes/updates src/main.py to pass the new tests.
+    Only outputs src/main.py — cannot touch tests.
+    """
+    instruction = state["instruction"]
+    workspace = state["workspace_dir"]
+    manifest = state.get("file_manifest", {})
+    edit_plan = state.get("edit_plan", [])
+    sandbox_errors = state.get("sandbox_errors", "")
+    regression_errors = state.get("regression_errors", "")
+
+    profile = _profile_from_state(state)
+    system = profile.prompt("apply_code_system")
+
+    source_main_path = profile.file_path("source_main")
+    test_main_path = profile.file_path("test_main")
+    current_code = manifest.get(source_main_path, "")
+    new_tests = manifest.get(test_main_path, "")
+
+    plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
+    user_prompt = (
+        f"Instruction:\n{instruction}\n\n"
+        f"Edit plan:\n{plan_block}\n\n"
+        f"Current code (src/main.py):\n--- src/main.py ---\n{current_code[:4000]}\n\n"
+        f"New tests (tests/test_main.py — your code MUST pass these):\n--- tests/test_main.py ---\n{new_tests[:4000]}"
+    )
+    if regression_errors:
+        user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:3000]}\nFix the code so the regression check passes."
+    elif sandbox_errors:
+        user_prompt += f"\n\nThe last verification failed:\n{sandbox_errors[:3000]}\nFix the code so all tests pass."
+
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "apply_code",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+            state=state,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("apply_code", state, e, workspace)
+
+    new_files = _parse_file_tags(content)
+    if not new_files:
+        _diag(workspace, "apply_code", f"No <file> tags in response\n{content[:2000]}")
+        return {
+            "sandbox_errors": "Apply_code Error: no file tags produced",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(workspace, "apply_code", "ERROR: no file tags produced"),
+        }
+
+    # Enforce code-only: filter out any test files.
+    code_files = {k: v for k, v in new_files.items() if not k.startswith("tests/")}
+    if len(code_files) < len(new_files):
+        _diag(workspace, "apply_code", f"Filtered out test files from apply_code response: {set(new_files) - set(code_files)}")
+
+    if not code_files:
+        _diag(workspace, "apply_code", "No code files in response after filtering")
+        return {
+            "sandbox_errors": "Apply_code Error: no code files produced",
+            "llm_usage": llm_usage,
+            "next_node": "FINISH",
+            "thoughts": _think(workspace, "apply_code", "ERROR: no code files after filtering"),
+        }
+
+    final_manifest = {**manifest, **code_files}
+    _diag(workspace, "apply_code", f"Updated code: {sorted(code_files.keys())}")
+
+    return {
+        "file_manifest": final_manifest,
+        "sandbox_errors": "",
+        "regression_errors": "",
+        "llm_usage": llm_usage,
+        "next_node": "regression_check",
+        "thoughts": _think(workspace, "apply_code", f"Wrote code to pass new tests: {', '.join(sorted(code_files.keys()))}"),
+    }
+
+
+# =============================================================================
+# NODE: regression_check (deterministic — runs ORIGINAL tests against EDITED code)
+# =============================================================================
+@node_with_history
+def regression_check(state: EditingState):
+    """Runs the original (pristine) fixture tests against the edited code.
+
+    Non-behavioral edits: original tests MUST still pass.
+    Behavioral edits: original tests MUST fail (confirming behavior changed).
+
+    Hard gate: failures loop back to apply/apply_code (max 3 loops).
+    No LLM — purely deterministic Docker sandbox run.
+    """
+    workspace = state["workspace_dir"]
+    source_manifest = state.get("source_manifest", {})
+    file_manifest = state.get("file_manifest", {})
+    test_impact = state.get("test_impact", "none")
+    loop = state.get("regression_loop_count", 0) + 1
+
+    profile = _profile_from_state(state)
+    test_main_path = profile.file_path("test_main")
+    source_main_path = profile.file_path("source_main")
+
+    original_tests = source_manifest.get(test_main_path, "")
+    edited_code = file_manifest.get(source_main_path, "")
+
+    if not original_tests:
+        _diag(workspace, "regression_check", "No original tests in source manifest — skipping")
+        return {
+            "regression_loop_count": loop,
+            "regression_errors": "",
+            "next_node": "verify",
+            "thoughts": _think(workspace, "regression_check", "No original tests — skipped"),
+        }
+
+    # Write a temporary workspace: edited code + ORIGINAL tests.
+    reg_workspace = os.path.join(workspace, ".regression")
+    _clear_directory(reg_workspace)
+    os.makedirs(reg_workspace, exist_ok=True)
+
+    # Copy all files from the edited manifest (code, config, etc).
+    for filename, content in file_manifest.items():
+        if filename == test_main_path:
+            continue  # Don't write the edited tests — use original.
+        _write_workspace_file(reg_workspace, filename, content)
+
+    # Write the ORIGINAL tests.
+    _write_workspace_file(reg_workspace, test_main_path, original_tests)
+
+    # Copy setup files.
+    for filename, content in profile.setup_files().items():
+        _write_workspace_file(reg_workspace, filename, content)
+
+    _chown_to_host(reg_workspace)
+
+    # Run pytest in a sandbox.
+    IMAGE = profile.sandbox_value("image", "python:3.11-slim")
+    memory_limit = profile.sandbox_value("memory", "512m")
+    timeout_install = profile.sandbox_value("timeout_install", 90)
+    timeout_test = profile.sandbox_value("timeout_test", 120)
+    timeout_total = timeout_install + timeout_test + 60
+    cpus = profile.sandbox_value("cpus", "2.0")
+    host_uid, host_gid = _host_identity()
+    task_id = state.get("task_id", workspace.split("/")[-1])
+
+    container_hardening = [
+        f"--user={host_uid}:{host_gid}",
+        f"--memory={memory_limit}",
+        f"--memory-swap={memory_limit}",
+        f"--cpus={cpus}",
+        "--pids-limit=64",
+        "--ulimit=nofile=1024:1024",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--stop-timeout=10",
+        "-e", "HOME=/tmp",
+        "-e", "TMPDIR=/tmp",
+        "-e", "PYTHONPYCACHEPREFIX=/tmp/pycache",
+    ]
+
+    workspace_mount = f"{resolve_host_path(reg_workspace)}:/workspace"
+    base_mounts = ["-v", workspace_mount, "-w", "/workspace"]
+    tmpfs_flags = ["--tmpfs", "/tmp:noexec,nosuid,size=100m", "--tmpfs", "/var/tmp:noexec,nosuid,size=50m"]
+
+    _diag(workspace, "regression_check", f"Running original tests against edited code (loop {loop}/{MAX_REGRESSION_LOOPS}, test_impact={test_impact})")
+
+    started = time.perf_counter()
+    try:
+        # Install deps.
+        _clear_directory(os.path.join(reg_workspace, ".deps"))
+        _clear_directory(os.path.join(reg_workspace, ".tmp"))
+
+        install_script = profile.resolve(profile.sandbox_value("install_command"))
+        install_cmd = (
+            ["docker", "run", "--rm", "--name", f"{task_id}-reg-install-{loop}"]
+            + container_hardening
+            + base_mounts
+            + tmpfs_flags
+            + ["-e", "PIP_NO_CACHE_DIR=1", "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+               "-e", "PIP_ROOT_USER_ACTION=ignore", "-e", "TMPDIR=/workspace/.tmp"]
+            + [IMAGE, "bash", "-c", install_script]
+        )
+        install_res = subprocess.run(install_cmd, capture_output=True, text=True, timeout=timeout_install)
+
+        if install_res.returncode != 0:
+            _diag(workspace, "regression_check", f"Install failed:\n{install_res.stderr[:1000]}")
+            return _regression_route(workspace, loop, test_impact, "infra_fault",
+                                     f"Regression install failed:\n{install_res.stderr[:2000]}")
+
+        # Run only pytest (no ruff/mypy — we only care about test results).
+        verify_env = ["-e", "PYTHONPATH=/workspace/.deps"]
+        test_cmd = (
+            ["docker", "run", "--rm", "--network", "none", "--read-only",
+             "--name", f"{task_id}-reg-verify-{loop}"]
+            + container_hardening
+            + base_mounts
+            + tmpfs_flags
+            + verify_env
+            + [IMAGE, "bash", "-c",
+             f"export PYTHONPATH=/workspace/.deps && python -m pytest {test_main_path} -p no:cacheprovider --timeout=30 -v"]
+        )
+        test_res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout_total)
+        duration = time.perf_counter() - started
+
+        stdout = test_res.stdout
+        stderr = test_res.stderr
+        _diag(workspace, "regression_check", f"Pytest exit={test_res.returncode} ({duration:.1f}s)\nSTDOUT:\n{stdout[:2000]}\nSTDERR:\n{stderr[:1000]}")
+
+        tests_passed = (test_res.returncode == 0)
+        is_behavioral = test_impact in ("update_existing", "both")
+
+        if is_behavioral:
+            # Behavioral change: original tests SHOULD fail.
+            if not tests_passed:
+                _diag(workspace, "regression_check", "Original tests failed as expected (behavioral change confirmed)")
+                return {
+                    "regression_loop_count": loop,
+                    "regression_errors": "",
+                    "docker_runs": [_docker_run_record(loop, "regression_pass", duration, stdout, stderr)],
+                    "next_node": "verify",
+                    "thoughts": _think(workspace, "regression_check", f"Loop {loop}: original tests failed as expected (behavioral change) → verify"),
+                }
+            else:
+                # Original tests still pass — the behavioral change wasn't applied.
+                _diag(workspace, "regression_check", "WARNING: original tests still pass — behavioral change may not have been applied")
+                return _regression_route(workspace, loop, test_impact, "behavior_not_applied",
+                                         "Original tests still pass after a behavioral edit — the change may not have been applied.\n"
+                                         f"Pytest output:\n{stdout[:2000]}")
+        else:
+            # Non-behavioral: original tests MUST still pass.
+            if tests_passed:
+                _diag(workspace, "regression_check", "Original tests still pass (no regression)")
+                return {
+                    "regression_loop_count": loop,
+                    "regression_errors": "",
+                    "docker_runs": [_docker_run_record(loop, "regression_pass", duration, stdout, stderr)],
+                    "next_node": "verify",
+                    "thoughts": _think(workspace, "regression_check", f"Loop {loop}: original tests pass (no regression) → verify"),
+                }
+            else:
+                _diag(workspace, "regression_check", f"REGRESSION: original tests failed:\n{stdout[:2000]}")
+                return _regression_route(workspace, loop, test_impact, "regression",
+                                         f"Original tests failed after edit (regression):\n{stdout[:3000]}\n{stderr[:1000]}")
+
+    except subprocess.TimeoutExpired:
+        duration = time.perf_counter() - started
+        _diag(workspace, "regression_check", f"Regression check timed out after {duration:.1f}s")
+        return _regression_route(workspace, loop, test_impact, "timeout",
+                                 f"Regression check timed out after {duration:.1f}s")
+    except Exception as e:
+        duration = time.perf_counter() - started
+        _diag(workspace, "regression_check", f"Regression check crashed: {type(e).__name__}: {e}")
+        return _regression_route(workspace, loop, test_impact, "crash",
+                                 f"Regression check crashed: {type(e).__name__}: {e}")
+    finally:
+        _clear_directory(reg_workspace)
+
+
+def _regression_route(workspace: str, loop: int, test_impact: str, fault: str, errors: str) -> dict:
+    """Route after a regression check failure. Loops back to apply/apply_code
+    up to MAX_REGRESSION_LOOPS, then gives up and goes to verify."""
+    if loop < MAX_REGRESSION_LOOPS:
+        # Route back to the appropriate apply node.
+        if test_impact == "none":
+            next_node = "apply"
+        else:
+            next_node = "apply_code"
+        return {
+            "regression_loop_count": loop,
+            "regression_errors": errors,
+            "next_node": next_node,
+            "thoughts": _think(workspace, "regression_check", f"Loop {loop}: {fault} → retry {next_node} ({loop}/{MAX_REGRESSION_LOOPS})"),
+        }
+    # Exhausted regression loops — fall through to verify as a last resort.
+    return {
+        "regression_loop_count": loop,
+        "regression_errors": errors,
         "next_node": "verify",
-        "thoughts": _think(workspace, "apply", f"Edited {len(new_files)} file(s): {', '.join(sorted(new_files.keys()))}"),
+        "thoughts": _think(workspace, "regression_check", f"Loop {loop}: {fault} — regression loop ceiling reached → verify"),
     }
 
 
@@ -1095,7 +1490,7 @@ def verify(state: EditingState):
                 "thoughts": _think(workspace, "verify", f"Loop {loop}: verification PASS ({round(total_duration, 1)}s)"),
             }
 
-        return _route_sandbox_failure(workspace, loop, diagnostics, docker_runs, manifest)
+        return _route_sandbox_failure(workspace, loop, diagnostics, docker_runs, manifest, test_impact=state.get("test_impact", "none"))
 
     except subprocess.TimeoutExpired as e:
         total_duration = time.perf_counter() - started
@@ -1171,9 +1566,15 @@ def _route_sandbox_failure(
     diagnostics: Dict[str, Any],
     docker_runs: List[dict],
     manifest: Dict[str, str],
+    test_impact: str = "none",
 ) -> Dict[str, Any]:
     status = diagnostics["sandbox_status"]
-    _diag(workspace, "verify", f"Verification failure: status={status}")
+    _diag(workspace, "verify", f"Verification failure: status={status} (test_impact={test_impact})")
+
+    # Determine the correct retry target based on which apply path was used.
+    uses_tdd = test_impact != "none"
+    code_retry_target = "apply_code" if uses_tdd else "apply"
+    test_retry_target = "apply_tests" if uses_tdd else "plan"
 
     if status == "test_fault":
         return {
@@ -1182,8 +1583,8 @@ def _route_sandbox_failure(
             "sandbox_diagnostics": diagnostics,
             "sandbox_loop_count": loop,
             "docker_runs": docker_runs,
-            "next_node": "plan",
-            "thoughts": _think(workspace, "verify", f"Loop {loop}: test-side fault → plan"),
+            "next_node": test_retry_target,
+            "thoughts": _think(workspace, "verify", f"Loop {loop}: test-side fault → {test_retry_target}"),
         }
 
     if status == "infra_fault":
@@ -1204,8 +1605,8 @@ def _route_sandbox_failure(
             "sandbox_diagnostics": diagnostics,
             "sandbox_loop_count": loop,
             "docker_runs": docker_runs,
-            "next_node": "apply",
-            "thoughts": _think(workspace, "verify", f"Loop {loop}: code fault → apply"),
+            "next_node": code_retry_target,
+            "thoughts": _think(workspace, "verify", f"Loop {loop}: code fault → {code_retry_target}"),
         }
 
     return {

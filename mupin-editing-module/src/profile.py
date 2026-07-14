@@ -121,6 +121,8 @@ class Profile:
             "analyze_system",
             "plan_system",
             "apply_system",
+            "apply_tests_system",
+            "apply_code_system",
         }
         missing_prompts = required_prompt_keys - set(self.prompts.keys())
         if missing_prompts:

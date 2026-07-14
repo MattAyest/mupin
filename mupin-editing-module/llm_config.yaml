@@ -32,7 +32,7 @@ nodes:
         temperature: 0.2
         api_key_env_var: "OLLAMA_API_KEY"
 
-    # Applies the edits to the workspace files.
+    # Applies the edits to the workspace files (used when test_impact=none).
     # WORKLOAD: premium — code generation and modification.
     apply:
         provider: "ollama-cloud"
@@ -40,8 +40,25 @@ nodes:
         temperature: 0.1
         api_key_env_var: "OLLAMA_API_KEY"
 
+    # Writes/updates tests FIRST for target behavior (TDD approach).
+    # WORKLOAD: premium — test design for target behavior.
+    apply_tests:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
+    # Writes code to pass the new tests.
+    # WORKLOAD: premium — code generation to satisfy test specification.
+    apply_code:
+        provider: "ollama-cloud"
+        model: "kimi-k2.7-code:cloud"
+        temperature: 0.1
+        api_key_env_var: "OLLAMA_API_KEY"
+
 loop_limits:
     max_sandbox_loops: 5
+    max_regression_loops: 3
 
 resilience:
     # Per-node infra retries for transient LLM faults (timeouts, 5xx, conn drops).

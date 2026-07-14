@@ -1,6 +1,13 @@
 """Shared state schema for the editing module pipeline.
 
-The editing pipeline is intentionally small: load, analyze, plan, apply, verify.
+Pipeline (v0.2):
+    load_source → analyze → plan → route_on_test_impact
+        │ none: apply (code-only)
+        │ update_existing/add_new/both: apply_tests → apply_code
+        → regression_check (hard gate, max 3 loops)
+        → verify (sandbox, max 5 loops)
+        → FINISH
+
 All routing is done by writing `next_node` and reading it in conditional edges.
 """
 
@@ -19,14 +26,19 @@ class EditingState(TypedDict):
     profile_name: str
 
     # ------------------------------------------------------------------
-    # Loaded source state
+    # Loaded source state (immutable — apply nodes cannot modify this)
     # ------------------------------------------------------------------
     source_manifest: Dict[str, str]
 
     # ------------------------------------------------------------------
+    # Analysis / planning artifacts
+    # ------------------------------------------------------------------
+    test_impact: str  # none | update_existing | add_new | both
+    edit_plan: List[Dict[str, Any]]
+
+    # ------------------------------------------------------------------
     # Edit artifacts
     # ------------------------------------------------------------------
-    edit_plan: List[Dict[str, Any]]
     file_manifest: Dict[str, str]
 
     # ------------------------------------------------------------------
@@ -39,6 +51,8 @@ class EditingState(TypedDict):
     # Loop counters / guard rails
     # ------------------------------------------------------------------
     sandbox_loop_count: int
+    regression_loop_count: int
+    regression_errors: str
 
     # ------------------------------------------------------------------
     # Routing signal
