@@ -8,6 +8,7 @@ profile loader patterns, but implements a 4-node editing pipeline:
 """
 
 import asyncio
+import ast
 import difflib
 import json
 import os
@@ -655,9 +656,15 @@ def setup_workspace(workspace: str, profile: Profile) -> None:
     _chown_to_host(workspace)
 
 
-def write_manifest_to_disk(workspace: str, manifest: Dict[str, str], preserve_unlisted: bool = True) -> None:
+def write_manifest_to_disk(
+    workspace: str,
+    manifest: Dict[str, str],
+    preserve_unlisted: bool = True,
+    deleted_files: List[str] | None = None,
+) -> None:
     """Write manifest files to disk. If preserve_unlisted is True, any file in the
-    workspace that is not in the manifest is left untouched."""
+    workspace that is not in the manifest is left untouched. Files in deleted_files
+    are removed from disk."""
     if not preserve_unlisted:
         _clear_directory(os.path.join(workspace, "src"))
         _clear_directory(os.path.join(workspace, "tests"))
@@ -667,6 +674,17 @@ def write_manifest_to_disk(workspace: str, manifest: Dict[str, str], preserve_un
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(code)
+
+    # Delete files marked for deletion.
+    if deleted_files:
+        for filename in deleted_files:
+            filepath = os.path.join(workspace, filename)
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    _diag(workspace, "write_manifest", f"Deleted file: {filename}")
+            except Exception as e:
+                _diag(workspace, "write_manifest", f"Failed to delete {filename}: {e}")
 
     # Always chown the directories we may have touched.
     _chown_to_host(os.path.join(workspace, "src"))
@@ -737,18 +755,137 @@ def compute_diff(source_manifest: Dict[str, str], final_manifest: Dict[str, str]
 # =============================================================================
 # File manifest parsing
 # =============================================================================
-def _parse_file_tags(content: str) -> Dict[str, str]:
+def _parse_file_tags(content: str) -> tuple[Dict[str, str], List[str]]:
+    """Parse <file> tags from LLM output. Returns (files, deleted_files)."""
     files: Dict[str, str] = {}
+    deleted: List[str] = []
+
+    # Match file tags with optional delete attribute.
     for match in re.finditer(
-        r'<file name=[\'"](.*?)[\'"]>\s*(.*?)\s*</file>',
+        r'<file\s+name=[\'"](.*?)[\'"](\s+delete=[\'"]true[\'"])?\s*>\s*(.*?)\s*</file>',
         content,
         re.DOTALL | re.IGNORECASE,
     ):
-        code = match.group(2).strip()
-        code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
         filename = match.group(1).strip()
-        files[filename] = code
-    return files
+        is_delete = match.group(2) is not None
+        if is_delete:
+            deleted.append(filename)
+        else:
+            code = match.group(3).strip()
+            code = re.sub(r"^```[a-zA-Z]*\n?", "", code).rstrip("`").strip()
+            files[filename] = code
+    return files, deleted
+
+
+def _check_test_quality(
+    test_code: str,
+    original_test_code: str,
+    test_impact: str,
+) -> tuple[bool, str]:
+    """AST-based test quality checks. Returns (passed, issues_message)."""
+    issues: List[str] = []
+
+    try:
+        tree = ast.parse(test_code)
+    except SyntaxError as e:
+        return False, f"Test file has syntax error: {e}"
+
+    test_funcs = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+    ]
+
+    if not test_funcs:
+        issues.append("No test_* functions found in test file")
+
+    for func in test_funcs:
+        has_assert = any(isinstance(n, ast.Assert) for n in ast.walk(func))
+        if not has_assert:
+            # Check for pytest.raises or other pytest patterns that don't use bare assert.
+            has_pytest_raises = any(
+                isinstance(n, ast.With) and any(
+                    isinstance(item, ast.withitem) and
+                    isinstance(item.context_expr, ast.Call) and
+                    getattr(item.context_expr.func, 'attr', '') == 'raises'
+                    for item in func.body
+                    if isinstance(func.body, list)
+                )
+                for n in ast.walk(func)
+            )
+            if not has_pytest_raises:
+                issues.append(f"{func.name}: no assert statement or pytest.raises")
+
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assert):
+                if isinstance(node.test, ast.Constant) and node.test.value is True:
+                    issues.append(f"{func.name}: assert True — not a real test")
+                elif isinstance(node.test, ast.Constant) and isinstance(node.test.value, int) and node.test.value != 0:
+                    issues.append(f"{func.name}: assert {node.test.value} — constant assertion")
+
+    # Check: imports from source module
+    has_source_import = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and "src" in node.module:
+            has_source_import = True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if "src" in alias.name:
+                    has_source_import = True
+    if not has_source_import:
+        issues.append("Test file does not import from src module")
+
+    # Check: original tests preserved for add_new
+    if test_impact == "add_new" and original_test_code:
+        try:
+            orig_tree = ast.parse(original_test_code)
+            orig_names = {
+                n.name for n in ast.walk(orig_tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+            }
+            new_names = {
+                n.name for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+            }
+            missing = orig_names - new_names
+            if missing:
+                issues.append(f"Original test functions deleted: {missing}")
+        except SyntaxError:
+            pass
+
+    # Check: at least one new or modified test for update_existing/both
+    if test_impact in ("update_existing", "both") and original_test_code:
+        try:
+            orig_tree = ast.parse(original_test_code)
+            orig_names = {
+                n.name for n in ast.walk(orig_tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+            }
+            new_names = {
+                n.name for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+            }
+            added = new_names - orig_names
+            if not added:
+                # Check if any existing test body changed by comparing AST dumps.
+                orig_dumps = {}
+                for n in ast.walk(orig_tree):
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_"):
+                        orig_dumps[n.name] = ast.dump(n)
+                new_dumps = {}
+                for n in ast.walk(tree):
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_"):
+                        new_dumps[n.name] = ast.dump(n)
+                modified = [
+                    name for name in new_dumps
+                    if name in orig_dumps and new_dumps[name] != orig_dumps[name]
+                ]
+                if not modified:
+                    issues.append("No new or modified test functions found for a behavioral change")
+        except SyntaxError:
+            pass
+
+    passed = len(issues) == 0
+    return passed, "\n".join(issues)
 
 
 def _parse_analysis(content: str) -> Dict[str, Any]:
@@ -948,8 +1085,8 @@ def apply(state: EditingState):
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("apply", state, e, workspace)
 
-    new_files = _parse_file_tags(content)
-    if not new_files:
+    new_files, deleted_files = _parse_file_tags(content)
+    if not new_files and not deleted_files:
         _diag(workspace, "apply", f"No <file> tags in response\n{content[:2000]}")
         return {
             "sandbox_errors": "Apply Error: no file tags produced",
@@ -958,14 +1095,17 @@ def apply(state: EditingState):
             "thoughts": _think(workspace, "apply", "ERROR: no file tags produced"),
         }
 
-    # Enforce code-only: filter out any test files the LLM might output.
-    test_main_path = profile.file_path("test_main")
-    code_files = {k: v for k, v in new_files.items() if not k.startswith("tests/")}
-    if len(code_files) < len(new_files):
-        _diag(workspace, "apply", f"Filtered out test files from apply response: {set(new_files) - set(code_files)}")
+    # Enforce code-only: allow src/ files and requirements.txt, filter test files.
+    allowed_code = {
+        k: v for k, v in new_files.items()
+        if k.startswith("src/") or k == "requirements.txt"
+    }
+    filtered = set(new_files) - set(allowed_code)
+    if filtered:
+        _diag(workspace, "apply", f"Filtered out non-code files from apply response: {filtered}")
 
-    if not code_files:
-        _diag(workspace, "apply", "No code files in response after filtering test files")
+    if not allowed_code and not deleted_files:
+        _diag(workspace, "apply", "No code files in response after filtering")
         return {
             "sandbox_errors": "Apply Error: no code files produced",
             "llm_usage": llm_usage,
@@ -973,16 +1113,22 @@ def apply(state: EditingState):
             "thoughts": _think(workspace, "apply", "ERROR: no code files after filtering"),
         }
 
-    final_manifest = {**manifest, **code_files}
-    _diag(workspace, "apply", f"Applied edits to: {sorted(code_files.keys())}")
+    final_manifest = {**manifest, **allowed_code}
+    # Remove deleted files from manifest.
+    for df in deleted_files:
+        final_manifest.pop(df, None)
+    all_deleted = list(set((state.get("deleted_files") or []) + deleted_files))
+
+    _diag(workspace, "apply", f"Applied edits to: {sorted(allowed_code.keys())} | deleted: {deleted_files}")
 
     return {
         "file_manifest": final_manifest,
+        "deleted_files": all_deleted,
         "sandbox_errors": "",
         "regression_errors": "",
         "llm_usage": llm_usage,
         "next_node": "regression_check",
-        "thoughts": _think(workspace, "apply", f"Edited {len(code_files)} file(s): {', '.join(sorted(code_files.keys()))}"),
+        "thoughts": _think(workspace, "apply", f"Edited {len(allowed_code)} file(s), deleted {len(deleted_files)}"),
     }
 
 
@@ -992,31 +1138,49 @@ def apply(state: EditingState):
 @node_with_history
 def apply_tests(state: EditingState):
     """Writes/updates tests for the TARGET behavior before code is changed.
-    Only outputs tests/test_main.py — cannot touch src/main.py.
+    Only outputs files under tests/ — cannot touch src/ or requirements.txt.
+    Runs AST-based test quality checks (hard gate, 3 loops).
     """
     instruction = state["instruction"]
     workspace = state["workspace_dir"]
     manifest = state.get("file_manifest", {})
     edit_plan = state.get("edit_plan", [])
     regression_errors = state.get("regression_errors", "")
+    test_quality_errors = state.get("test_quality_errors", "")
+    test_quality_loops = state.get("test_quality_loop_count", 0)
+    test_impact = state.get("test_impact", "none")
 
     profile = _profile_from_state(state)
     system = profile.prompt("apply_tests_system")
 
     source_main_path = profile.file_path("source_main")
     test_main_path = profile.file_path("test_main")
-    current_code = manifest.get(source_main_path, "")
-    current_tests = manifest.get(test_main_path, "")
+    source_manifest = state.get("source_manifest", {})
+    original_tests = source_manifest.get(test_main_path, "")
+
+    # Include all current test files, not just test_main.
+    current_tests_block = "\n\n".join(
+        f"--- {fname} ---\n{content[:4000]}"
+        for fname, content in sorted(manifest.items())
+        if fname.startswith("tests/")
+    )
+    current_code_block = "\n\n".join(
+        f"--- {fname} ---\n{content[:4000]}"
+        for fname, content in sorted(manifest.items())
+        if fname.startswith("src/")
+    )
 
     plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
     user_prompt = (
         f"Instruction:\n{instruction}\n\n"
         f"Edit plan:\n{plan_block}\n\n"
-        f"Current code (src/main.py — for context, write tests for TARGET behavior):\n--- src/main.py ---\n{current_code[:4000]}\n\n"
-        f"Current tests (tests/test_main.py — update these):\n--- tests/test_main.py ---\n{current_tests[:4000]}"
+        f"Current code (for context, write tests for TARGET behavior):\n{current_code_block}\n\n"
+        f"Current tests (update these):\n{current_tests_block}"
     )
     if regression_errors:
         user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:3000]}\nUpdate the tests to correctly reflect the target behavior."
+    if test_quality_errors:
+        user_prompt += f"\n\nThe test quality check failed:\n{test_quality_errors[:3000]}\nFix the test issues and resubmit."
 
     try:
         content, llm_usage = _invoke_with_retry(
@@ -1028,8 +1192,8 @@ def apply_tests(state: EditingState):
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("apply_tests", state, e, workspace)
 
-    new_files = _parse_file_tags(content)
-    if not new_files:
+    new_files, deleted_files = _parse_file_tags(content)
+    if not new_files and not deleted_files:
         _diag(workspace, "apply_tests", f"No <file> tags in response\n{content[:2000]}")
         return {
             "sandbox_errors": "Apply_tests Error: no file tags produced",
@@ -1038,12 +1202,14 @@ def apply_tests(state: EditingState):
             "thoughts": _think(workspace, "apply_tests", "ERROR: no file tags produced"),
         }
 
-    # Enforce tests-only: filter out any code files the LLM might output.
+    # Enforce tests-only: filter to tests/ directory only.
     test_files = {k: v for k, v in new_files.items() if k.startswith("tests/")}
-    if len(test_files) < len(new_files):
-        _diag(workspace, "apply_tests", f"Filtered out code files from apply_tests response: {set(new_files) - set(test_files)}")
+    test_deletes = [f for f in deleted_files if f.startswith("tests/")]
+    filtered = set(new_files) - set(test_files)
+    if filtered:
+        _diag(workspace, "apply_tests", f"Filtered out non-test files: {filtered}")
 
-    if not test_files:
+    if not test_files and not test_deletes:
         _diag(workspace, "apply_tests", "No test files in response after filtering")
         return {
             "sandbox_errors": "Apply_tests Error: no test files produced",
@@ -1052,14 +1218,47 @@ def apply_tests(state: EditingState):
             "thoughts": _think(workspace, "apply_tests", "ERROR: no test files after filtering"),
         }
 
-    # Merge test files into manifest — code files are preserved unchanged.
+    # Merge test files into manifest.
     final_manifest = {**manifest, **test_files}
-    _diag(workspace, "apply_tests", f"Updated tests: {sorted(test_files.keys())}")
+    for df in test_deletes:
+        final_manifest.pop(df, None)
+
+    # --- Test quality check (hard gate, 3 loops) ---
+    # Check the primary test file (or the first test file if multiple).
+    primary_test = test_files.get(test_main_path, "")
+    if not primary_test:
+        # If test_main.py wasn't output, use the first test file.
+        primary_test = next(iter(test_files.values()), "")
+
+    if primary_test:
+        quality_ok, quality_issues = _check_test_quality(primary_test, original_tests, test_impact)
+        if not quality_ok:
+            new_loops = test_quality_loops + 1
+            _diag(workspace, "apply_tests", f"Test quality check failed (loop {new_loops}/3):\n{quality_issues}")
+            if new_loops < 3:
+                return {
+                    "file_manifest": final_manifest,
+                    "test_quality_loop_count": new_loops,
+                    "test_quality_errors": quality_issues,
+                    "llm_usage": llm_usage,
+                    "next_node": "apply_tests",
+                    "thoughts": _think(workspace, "apply_tests", f"Test quality failed (loop {new_loops}/3) → retry"),
+                }
+            else:
+                _diag(workspace, "apply_tests", "Test quality loops exhausted — proceeding anyway")
+    # Reset quality errors on success or exhaustion.
+    test_quality_errors = ""
+
+    all_deleted = list(set((state.get("deleted_files") or []) + test_deletes))
+    _diag(workspace, "apply_tests", f"Updated tests: {sorted(test_files.keys())} | deleted: {test_deletes}")
 
     return {
         "file_manifest": final_manifest,
+        "deleted_files": all_deleted,
         "sandbox_errors": "",
         "regression_errors": "",
+        "test_quality_loop_count": 0,
+        "test_quality_errors": "",
         "llm_usage": llm_usage,
         "next_node": "apply_code",
         "thoughts": _think(workspace, "apply_tests", f"Wrote tests for target behavior: {', '.join(sorted(test_files.keys()))}"),
@@ -1111,8 +1310,42 @@ def apply_code(state: EditingState):
     except LLMUnavailableError as e:
         return _handle_llm_unavailable("apply_code", state, e, workspace)
 
-    new_files = _parse_file_tags(content)
-    if not new_files:
+    # Include all current src/ files and test files for context.
+    current_code_block = "\n\n".join(
+        f"--- {fname} ---\n{content[:4000]}"
+        for fname, content in sorted(manifest.items())
+        if fname.startswith("src/")
+    )
+    new_tests_block = "\n\n".join(
+        f"--- {fname} ---\n{content[:4000]}"
+        for fname, content in sorted(manifest.items())
+        if fname.startswith("tests/")
+    )
+
+    plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
+    user_prompt = (
+        f"Instruction:\n{instruction}\n\n"
+        f"Edit plan:\n{plan_block}\n\n"
+        f"Current code:\n{current_code_block}\n\n"
+        f"New tests (your code MUST pass these):\n{new_tests_block}"
+    )
+    if regression_errors:
+        user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:3000]}\nFix the code so the regression check passes."
+    elif sandbox_errors:
+        user_prompt += f"\n\nThe last verification failed:\n{sandbox_errors[:3000]}\nFix the code so all tests pass."
+
+    try:
+        content, llm_usage = _invoke_with_retry(
+            "apply_code",
+            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
+            workspace,
+            state=state,
+        )
+    except LLMUnavailableError as e:
+        return _handle_llm_unavailable("apply_code", state, e, workspace)
+
+    new_files, deleted_files = _parse_file_tags(content)
+    if not new_files and not deleted_files:
         _diag(workspace, "apply_code", f"No <file> tags in response\n{content[:2000]}")
         return {
             "sandbox_errors": "Apply_code Error: no file tags produced",
@@ -1121,12 +1354,17 @@ def apply_code(state: EditingState):
             "thoughts": _think(workspace, "apply_code", "ERROR: no file tags produced"),
         }
 
-    # Enforce code-only: filter out any test files.
-    code_files = {k: v for k, v in new_files.items() if not k.startswith("tests/")}
-    if len(code_files) < len(new_files):
-        _diag(workspace, "apply_code", f"Filtered out test files from apply_code response: {set(new_files) - set(code_files)}")
+    # Enforce code-only: allow src/ files and requirements.txt, filter test files.
+    allowed_code = {
+        k: v for k, v in new_files.items()
+        if k.startswith("src/") or k == "requirements.txt"
+    }
+    code_deletes = [f for f in deleted_files if f.startswith("src/") or f == "requirements.txt"]
+    filtered = set(new_files) - set(allowed_code)
+    if filtered:
+        _diag(workspace, "apply_code", f"Filtered out non-code files: {filtered}")
 
-    if not code_files:
+    if not allowed_code and not code_deletes:
         _diag(workspace, "apply_code", "No code files in response after filtering")
         return {
             "sandbox_errors": "Apply_code Error: no code files produced",
@@ -1135,16 +1373,21 @@ def apply_code(state: EditingState):
             "thoughts": _think(workspace, "apply_code", "ERROR: no code files after filtering"),
         }
 
-    final_manifest = {**manifest, **code_files}
-    _diag(workspace, "apply_code", f"Updated code: {sorted(code_files.keys())}")
+    final_manifest = {**manifest, **allowed_code}
+    for df in code_deletes:
+        final_manifest.pop(df, None)
+    all_deleted = list(set((state.get("deleted_files") or []) + code_deletes))
+
+    _diag(workspace, "apply_code", f"Updated code: {sorted(allowed_code.keys())} | deleted: {code_deletes}")
 
     return {
         "file_manifest": final_manifest,
+        "deleted_files": all_deleted,
         "sandbox_errors": "",
         "regression_errors": "",
         "llm_usage": llm_usage,
         "next_node": "regression_check",
-        "thoughts": _think(workspace, "apply_code", f"Wrote code to pass new tests: {', '.join(sorted(code_files.keys()))}"),
+        "thoughts": _think(workspace, "apply_code", f"Wrote code: {', '.join(sorted(allowed_code.keys()))}, deleted {len(code_deletes)}"),
     }
 
 
@@ -1369,7 +1612,7 @@ def verify(state: EditingState):
     manifest = state.get("file_manifest", {})
     loop = state.get("sandbox_loop_count", 0) + 1
 
-    write_manifest_to_disk(workspace, manifest, preserve_unlisted=True)
+    write_manifest_to_disk(workspace, manifest, preserve_unlisted=True, deleted_files=state.get("deleted_files"))
 
     profile = _profile_from_state(state)
     IMAGE = profile.sandbox_value("image", "python:3.11-slim")
@@ -1464,15 +1707,12 @@ def verify(state: EditingState):
         stderr = arbiter_res.stderr
         _diag(workspace, "verify", f"Verification output:\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
 
-        # Re-read files that tooling may have mutated.
-        source_main_path = profile.file_path("source_main")
-        test_main_path = profile.file_path("test_main")
-        new_main = read_file_from_disk(workspace, source_main_path)
-        new_test = read_file_from_disk(workspace, test_main_path)
-        if new_main.strip():
-            manifest[source_main_path] = new_main
-        if new_test.strip():
-            manifest[test_main_path] = new_test
+        # Re-read all files that tooling may have mutated (ruff format, etc).
+        for fname in list(manifest.keys()):
+            if fname.startswith("src/") or fname.startswith("tests/"):
+                new_content = read_file_from_disk(workspace, fname)
+                if new_content.strip():
+                    manifest[fname] = new_content
 
         diagnostics = _parse_sandbox_output(stdout, stderr, loop)
         docker_runs = install_docker_runs + [

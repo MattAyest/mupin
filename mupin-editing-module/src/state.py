@@ -53,6 +53,13 @@ class EditingState(TypedDict):
     sandbox_loop_count: int
     regression_loop_count: int
     regression_errors: str
+    test_quality_loop_count: int
+    test_quality_errors: str
+
+    # ------------------------------------------------------------------
+    # File deletion tracking
+    # ------------------------------------------------------------------
+    deleted_files: List[str]
 
     # ------------------------------------------------------------------
     # Routing signal
