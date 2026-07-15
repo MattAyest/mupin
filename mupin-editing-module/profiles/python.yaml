@@ -57,7 +57,7 @@ sandbox:
     echo "__RUFF_CHECK_TESTS_OK__"
 
     echo "__TAUTOLOGY_START__"
-    python -c "import ast,sys,pathlib; bad=[str(tf) for tf in pathlib.Path('tests').glob('**/test_*.py') for n in ast.parse(tf.read_text()).body if isinstance(n,ast.Compare) and len(n.comparators)==1 and ast.dump(n.left)==ast.dump(n.comparators[0])]; sys.exit(1) if bad else None" || { echo "__TAUTOLOGY_FAILED__"; exit 1; }
+    python -c "import ast,sys,pathlib; bad=[str(tf) for tf in pathlib.Path('tests').glob('**/test_*.py') for n in ast.walk(ast.parse(tf.read_text())) if isinstance(n,ast.Compare) and len(n.comparators)==1 and ast.dump(n.left)==ast.dump(n.comparators[0])]; sys.exit(1) if bad else None" || { echo "__TAUTOLOGY_FAILED__"; exit 1; }
     echo "__TAUTOLOGY_OK__"
 
     echo "__MYPY_START__"

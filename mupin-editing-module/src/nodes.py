@@ -1270,8 +1270,8 @@ def apply_tests(state: EditingState):
 # =============================================================================
 @node_with_history
 def apply_code(state: EditingState):
-    """Writes/updates src/main.py to pass the new tests.
-    Only outputs src/main.py — cannot touch tests.
+    """Writes/updates code to pass the new tests.
+    Only outputs files under src/ and requirements.txt — cannot touch tests/.
     """
     instruction = state["instruction"]
     workspace = state["workspace_dir"]
@@ -1282,33 +1282,6 @@ def apply_code(state: EditingState):
 
     profile = _profile_from_state(state)
     system = profile.prompt("apply_code_system")
-
-    source_main_path = profile.file_path("source_main")
-    test_main_path = profile.file_path("test_main")
-    current_code = manifest.get(source_main_path, "")
-    new_tests = manifest.get(test_main_path, "")
-
-    plan_block = "\n".join(f"- {step}" for step in edit_plan) if edit_plan else "Apply the instruction."
-    user_prompt = (
-        f"Instruction:\n{instruction}\n\n"
-        f"Edit plan:\n{plan_block}\n\n"
-        f"Current code (src/main.py):\n--- src/main.py ---\n{current_code[:4000]}\n\n"
-        f"New tests (tests/test_main.py — your code MUST pass these):\n--- tests/test_main.py ---\n{new_tests[:4000]}"
-    )
-    if regression_errors:
-        user_prompt += f"\n\nThe last regression check failed:\n{regression_errors[:3000]}\nFix the code so the regression check passes."
-    elif sandbox_errors:
-        user_prompt += f"\n\nThe last verification failed:\n{sandbox_errors[:3000]}\nFix the code so all tests pass."
-
-    try:
-        content, llm_usage = _invoke_with_retry(
-            "apply_code",
-            [SystemMessage(content=system), HumanMessage(content=user_prompt)],
-            workspace,
-            state=state,
-        )
-    except LLMUnavailableError as e:
-        return _handle_llm_unavailable("apply_code", state, e, workspace)
 
     # Include all current src/ files and test files for context.
     current_code_block = "\n\n".join(
@@ -1411,14 +1384,14 @@ def regression_check(state: EditingState):
     loop = state.get("regression_loop_count", 0) + 1
 
     profile = _profile_from_state(state)
-    test_main_path = profile.file_path("test_main")
-    source_main_path = profile.file_path("source_main")
 
-    original_tests = source_manifest.get(test_main_path, "")
-    edited_code = file_manifest.get(source_main_path, "")
+    # Check if there are any original test files at all.
+    has_original_tests = any(
+        fname.startswith("tests/") for fname in source_manifest
+    )
 
-    if not original_tests:
-        _diag(workspace, "regression_check", "No original tests in source manifest — skipping")
+    if not has_original_tests:
+        _diag(workspace, "regression_check", "No original test files in source manifest — skipping")
         return {
             "regression_loop_count": loop,
             "regression_errors": "",
@@ -1432,13 +1405,19 @@ def regression_check(state: EditingState):
     os.makedirs(reg_workspace, exist_ok=True)
 
     # Copy all files from the edited manifest (code, config, etc).
+    # Skip ALL test files — we'll write the ORIGINAL tests instead.
     for filename, content in file_manifest.items():
-        if filename == test_main_path:
-            continue  # Don't write the edited tests — use original.
+        if filename.startswith("tests/"):
+            continue
         _write_workspace_file(reg_workspace, filename, content)
 
-    # Write the ORIGINAL tests.
-    _write_workspace_file(reg_workspace, test_main_path, original_tests)
+    # Write ALL original test files from the source manifest.
+    orig_test_count = 0
+    for filename, content in source_manifest.items():
+        if filename.startswith("tests/"):
+            _write_workspace_file(reg_workspace, filename, content)
+            orig_test_count += 1
+    _diag(workspace, "regression_check", f"Using {orig_test_count} original test file(s) from source manifest")
 
     # Copy setup files.
     for filename, content in profile.setup_files().items():
@@ -1509,8 +1488,8 @@ def regression_check(state: EditingState):
             + base_mounts
             + tmpfs_flags
             + verify_env
-            + [IMAGE, "bash", "-c",
-             f"export PYTHONPATH=/workspace/.deps && python -m pytest {test_main_path} -p no:cacheprovider --timeout=30 -v"]
+             + [IMAGE, "bash", "-c",
+              f"export PYTHONPATH=/workspace/.deps && python -m pytest tests/ -p no:cacheprovider --timeout=30 -v"]
         )
         test_res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=timeout_total)
         duration = time.perf_counter() - started
