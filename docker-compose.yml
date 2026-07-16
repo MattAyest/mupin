@@ -159,5 +159,29 @@ services:
       - mupin-api-backbone
       - mupin-editing-worker
 
+  mupin-planner:
+    build:
+      context: ./mupin-planner
+    container_name: mupin_planner
+    restart: always
+    ports:
+      - "${PLANNER_PORT:-8004}:8000"
+    env_file:
+      - ./.env
+      - ./mupin-planner/.env
+    environment:
+      BACKBONE_URL: http://mupin-api-backbone:8000
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./mupin-planner/src:/app/src:ro
+      - ./mupin-planner/llm_config.yaml:/app/llm_config.yaml:ro
+      - ./mupin-planner/module_registry.yaml:/app/module_registry.yaml:ro
+      - /etc/resolv.conf:/host-resolv.conf:ro
+    depends_on:
+      - mupin-api-backbone
+      - mupin-coding-worker
+      - mupin-editing-worker
+
 volumes:
   backbone_pg_data:

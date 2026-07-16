@@ -1,0 +1,50 @@
+# Module registry — describes what modules the planner can delegate to.
+# The planner LLM gets this as context so it knows what tools it has.
+
+modules:
+  - name: coding
+    job_type: coding
+    description: >
+      Generates a self-contained, tested code module from a natural-language
+      prompt. Designs tests, derives a skeleton, implements the code, and
+      verifies it in a hardened sandbox (ruff, mypy, pytest).
+    accepts:
+      prompt: str
+      profile_name: str
+    produces:
+      file_manifest: dict
+      tests: dict
+      sandbox_status: str
+    when_to_use: >
+      Use when creating new code from scratch — a new module, a new function,
+      a new test suite. The coding module handles the full pipeline: test
+      design, skeleton, implementation, and verification.
+
+  - name: editing
+    job_type: editing
+    description: >
+      Takes an existing code workspace and applies a natural-language edit
+      instruction. Uses TDD (tests first, then code), runs a regression check
+      against original tests, and verifies the result in a sandbox.
+    accepts:
+      source_job_id: str
+      source_files: dict
+      instruction: str
+      profile_name: str
+    produces:
+      file_manifest: dict
+      diff: str
+      sandbox_status: str
+    when_to_use: >
+      Use when modifying existing code — adding features, refactoring,
+      fixing bugs, changing behavior. Requires a source workspace from a
+      previous coding or editing job.
+
+  # Future modules:
+  # - name: ui
+  #   job_type: ui
+  #   description: "Generates UI components that can't be unit-tested."
+  #   accepts:
+  #     prompt: str
+  #   produces:
+  #     files: dict
