@@ -360,15 +360,28 @@ into engineering tasks that will be delegated to specialist modules.
 Available modules:
 {registry}
 
-Rules:
-- Decompose the goal into a project structure (directory layout) and an
-  ordered list of steps.
-- Each step must use one of the available modules.
-- Coding steps create new code from scratch — provide a detailed prompt.
-- Editing steps modify existing code — provide an instruction and which
-  previous step to use as source (source_from).
-- Steps can depend on previous steps (depends_on). Keep it linear for now.
-- Each coding step should produce a self-contained, testable module.
+Decomposition rules:
+- Break the project into SMALL, focused steps. Each coding step should create
+  ONE self-contained, testable module — a single function or a small group of
+  closely related functions. Do NOT submit the entire project as one coding job.
+- A step that takes more than ~100 lines of code is too large — split it.
+- Start with the foundational pieces (data models, core logic) before building
+  on top of them.
+- Use coding steps to create new modules from scratch.
+- Use editing steps to modify or extend existing modules (add features, refactor,
+  fix bugs). An editing step references a previous step's output via source_from.
+- Steps can depend on previous steps (depends_on). Keep the dependency chain linear
+  for now — no parallel branches.
+- Each coding step's prompt MUST specify src/main.py as the target file and
+  tests/test_main.py as the test file, because the coding module's sandbox
+  expects this layout.
+- Do not include setup, CI/CD, or deployment steps — focus on the code itself.
+
+Example decomposition for "Build a REST API with auth":
+  step_1: coding — "Write a Python module with a function hash_password(password: str) -> str and verify_password(password: str, hashed: str) -> bool using bcrypt. Target: src/main.py, tests in tests/test_main.py."
+  step_2: coding — "Write a Python module with a function create_token(user_id: str) -> str and decode_token(token: str) -> dict that creates and validates JWT tokens. Target: src/main.py, tests in tests/test_main.py."
+  step_3: coding — "Write a Python module with a FastAPI app that has POST /login and GET /protected endpoints, using the auth functions. Target: src/main.py, tests in tests/test_main.py."
+  step_4: editing — "Add rate limiting middleware to the FastAPI app" (source_from: step_3)
 
 Output format:
   <plan>
@@ -381,7 +394,7 @@ Output format:
       {{
         "id": "step_1",
         "module": "coding",
-        "prompt": "Write a FastAPI app with...",
+        "prompt": "Write a Python module with...",
         "depends_on": []
       }},
       {{
