@@ -102,6 +102,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
     prompt = payload.get("prompt", "")
     profile_name = payload.get("profile_name", "python")
     contract_code = payload.get("contract_code", "")
+    external_contract = payload.get("contract") or None
     deps_cache_tag = payload.get("deps_cache_tag") or None
     workspace_dir = str(WORKSPACE_ROOT / job_id)
 
@@ -130,6 +131,7 @@ async def run_job(ctx, job_type: str, job_id: str, payload: dict) -> dict:
             progress_callback=progress_callback,
             is_cancelled=cancellation_check,
             contract_code=contract_code,
+            external_contract=external_contract,
             deps_cache_tag=deps_cache_tag,
         )
     except asyncio.CancelledError:

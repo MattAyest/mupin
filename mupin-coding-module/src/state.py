@@ -20,10 +20,17 @@ class AgenticState(TypedDict):
 
     # Authoritative starter signature/imports extracted from the prompt by the
     # benchmark runner. Empty for prompts without a structured contract; in that
-    # case skeleton_maker falls back to test-derived inference. Used to keep the
-    # generated solution's import scope and signature aligned with canonical
-    # tests, which follow the prompt contract rather than the pipeline's tests.
+    # case skeleton_maker falls back to test-derived inference.
     contract_code: Optional[str]
+
+    # Optional external contract from the planner. When present, the
+    # skeleton_maker uses these file paths and exports instead of guessing.
+    # {
+    #   "source_file": "src/auth.py",
+    #   "test_file": "tests/test_auth.py",
+    #   "exports": ["function:hash_password(password: str) -> str", ...]
+    # }
+    external_contract: Optional[Dict[str, Any]]
 
     # Optional project tag for a persistent dependency cache. When unset (the
     # default) each task starts and ends with a clean .deps directory. When set,

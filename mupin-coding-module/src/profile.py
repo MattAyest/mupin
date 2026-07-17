@@ -107,6 +107,47 @@ class Profile:
         """Return the set of files that must be present in the manifest."""
         return set(self.files.get("manifest", []))
 
+    def with_overrides(self, source_file: str | None = None, test_file: str | None = None) -> "Profile":
+        """Return a new Profile with overridden file paths.
+
+        This is used when the planner provides an external contract that
+        specifies custom file names (e.g., src/auth.py instead of src/main.py).
+        The import_path is derived from the source_file name.
+        """
+        if not source_file and not test_file:
+            return self
+
+        import copy
+        import os
+
+        new_data = copy.deepcopy(self._data)
+
+        if source_file:
+            # Derive module name from file path: src/auth.py -> src.auth
+            module_path = source_file.replace("/", ".").removesuffix(".py")
+            new_data["files"]["source_main"] = source_file
+            new_data["prompts"]["import_path"] = module_path
+            new_data["prompts"]["source_file"] = source_file
+            # Update manifest to include the new source file.
+            manifest = new_data["files"].get("manifest", [])
+            if "src/main.py" in manifest:
+                manifest = [source_file if f == "src/main.py" else f for f in manifest]
+            elif source_file not in manifest:
+                manifest.append(source_file)
+            new_data["files"]["manifest"] = manifest
+
+        if test_file:
+            new_data["files"]["test_main"] = test_file
+            new_data["prompts"]["test_file"] = test_file
+            manifest = new_data["files"].get("manifest", [])
+            if "tests/test_main.py" in manifest:
+                manifest = [test_file if f == "tests/test_main.py" else f for f in manifest]
+            elif test_file not in manifest:
+                manifest.append(test_file)
+            new_data["files"]["manifest"] = manifest
+
+        return Profile(new_data, requested_name=self.requested_name)
+
     def _validate(self) -> None:
         required_sections = {"sandbox", "files", "prompts"}
         missing = required_sections - set(self._data.keys())

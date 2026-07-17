@@ -371,15 +371,18 @@ Decomposition rules:
   built — adding a feature to an existing module, fixing a bug, refactoring.
   Never use editing to incrementally build up code that should have been
   a single coding job.
-- Each step MUST declare its "exports" — the function names, class names,
-  and constants it makes available to other steps. This is the contract
-  that lets subsequent steps reference the correct symbols. Use the format:
-  "function:name", "class:Name", "constant:NAME".
+- Each step MUST specify its source_file and test_file. For standalone
+  modules use src/main.py and tests/test_main.py. For multi-module projects
+  use descriptive names: src/auth.py, src/api.py, tests/test_auth.py, etc.
+- Each step MAY declare a contract — the function names, class names, and
+  signatures it will export. This tells the coding module's skeleton_maker
+  exactly what to scaffold, so it doesn't have to guess. Use the format:
+  "function:hash_password(password: str) -> str"
+  "class:User"
+  "constant:MAX_RETRIES"
 - When a later step depends on an earlier step, its prompt/instruction
-  should reference the exported names so the coding/editing module knows
-  what to import and use.
-- Each coding step's prompt MUST specify src/main.py as the target file and
-  tests/test_main.py as the test file.
+  should reference the earlier step's file and function names so the
+  coding/editing module knows what to import.
 - Steps can depend on previous steps (depends_on). Keep it linear for now.
 - Do not include setup, CI/CD, or deployment steps.
 
@@ -407,10 +410,10 @@ Example decomposition for "Build a REST API with auth and rate limiting":
 
 Example decomposition for "Build a data pipeline with a web dashboard":
   step_1: coding — "Write a data pipeline module that reads CSV files, transforms
-    data, and writes to a database. Target: src/main.py, tests in tests/test_main.py."
+    data, and writes to a database. Target: src/pipeline.py, tests in tests/test_pipeline.py."
   step_2: coding — "Write a FastAPI web dashboard that queries the database and
-    displays results. Target: src/main.py, tests in tests/test_main.py."
-  (TWO steps — these are genuinely independent subsystems.)
+    displays results. Target: src/dashboard.py, tests in tests/test_dashboard.py."
+  (TWO steps — these are genuinely independent subsystems with their own files.)
 
 Output format:
   <plan>
@@ -424,15 +427,24 @@ Output format:
         "id": "step_1",
         "module": "coding",
         "prompt": "Write a Python module with...",
-        "exports": ["function:hash_password", "function:verify_password", "class:User"],
+        "source_file": "src/auth.py",
+        "test_file": "tests/test_auth.py",
+        "contract": {{
+          "exports": [
+            "function:hash_password(password: str) -> str",
+            "function:verify_password(password: str, hashed: str) -> bool",
+            "class:User"
+          ]
+        }},
         "depends_on": []
       }},
       {{
         "id": "step_2",
         "module": "editing",
-        "instruction": "Add rate limiting to the API",
+        "instruction": "Add rate limiting to the API in src/auth.py",
         "source_from": "step_1",
-        "exports": ["function:rate_limit_middleware"],
+        "source_file": "src/auth.py",
+        "test_file": "tests/test_auth.py",
         "depends_on": ["step_1"]
       }}
     ]
@@ -470,7 +482,9 @@ Output format:
             "job_id": "",
             "error": "",
             "result": {},
-            "exports": s.get("exports", []),
+            "source_file": s.get("source_file", "src/main.py"),
+            "test_file": s.get("test_file", "tests/test_main.py"),
+            "contract": s.get("contract", {}),
         })
 
     return {
@@ -510,6 +524,15 @@ async def dispatch(state: PlannerState) -> dict:
 
     if step["module"] == "coding":
         payload["prompt"] = step["prompt"]
+        # Pass contract through so the coding module's skeleton_maker
+        # uses the planner's file paths and exports instead of guessing.
+        contract = step.get("contract") or {}
+        if contract or step.get("source_file", "src/main.py") != "src/main.py":
+            payload["contract"] = {
+                "source_file": step.get("source_file", "src/main.py"),
+                "test_file": step.get("test_file", "tests/test_main.py"),
+                "exports": contract.get("exports", []),
+            }
         job_type = "coding"
     elif step["module"] == "editing":
         source_from = step.get("source_from", "")

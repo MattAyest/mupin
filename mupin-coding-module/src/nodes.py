@@ -121,8 +121,19 @@ SERVER_TASK_DEADLINE = CONFIG.get("server", {}).get("task_deadline_seconds", 360
 
 
 def _profile_from_state(state: AgenticState) -> Profile:
-    """Return the active language profile for this task."""
-    return get_profile(state.get("profile_name"))
+    """Return the active language profile for this task.
+
+    When an external contract is present (from the planner), the profile's
+    file paths are overridden to match the contract's source_file and test_file.
+    """
+    profile = get_profile(state.get("profile_name"))
+    external = state.get("external_contract")
+    if external and isinstance(external, dict):
+        source_file = external.get("source_file")
+        test_file = external.get("test_file")
+        if source_file or test_file:
+            profile = profile.with_overrides(source_file, test_file)
+    return profile
 
 
 # =============================================================================
@@ -936,6 +947,15 @@ def test_designer(state: AgenticState):
             f"```python\n{contract_code}\n```"
         )
 
+    external_contract = state.get("external_contract") or {}
+    if external_contract and external_contract.get("exports"):
+        exports_block = "\n".join(f"  - {e}" for e in external_contract["exports"])
+        user_prompt += (
+            f"\n\nExternal contract from the solutions architect (AUTHORITATIVE — "
+            f"your tests MUST import from {profile.file_path('source_main').replace('/', '.').removesuffix('.py')} "
+            f"and test these exact symbols):\n{exports_block}"
+        )
+
     prior_tests = manifest.get(test_main_path, "")
     if prior_tests:
         user_prompt += (
@@ -1021,6 +1041,7 @@ def skeleton_maker(state: AgenticState):
     manifest = state.get("file_manifest", {})
     contract_loop = state.get("contract_loop_count", 0)
     contract_code = state.get("contract_code") or ""
+    external_contract = state.get("external_contract") or {}
 
     profile = _profile_from_state(state)
     setup_workspace(workspace, profile)
@@ -1051,6 +1072,13 @@ def skeleton_maker(state: AgenticState):
             "it. The contract is the floor; also stub any additional symbols the tests "
             "require that the contract does not define):\n"
             f"```python\n{contract_code}\n```"
+        )
+    if external_contract and external_contract.get("exports"):
+        exports_block = "\n".join(f"  - {e}" for e in external_contract["exports"])
+        user_prompt += (
+            f"\n\nExternal contract from the solutions architect (AUTHORITATIVE — "
+            f"these are the exact symbols this module must export. Scaffold them "
+            f"with the given signatures; do not rename or omit any):\n{exports_block}"
         )
     user_prompt += f"\n\nTests/{test_main_path}:\n{test_code}"
 
@@ -1111,6 +1139,12 @@ def skeleton_maker(state: AgenticState):
     if not isinstance(raw_critique, list):
         raw_critique = [str(raw_critique)]
     critique = [str(c) for c in raw_critique if c]
+
+    # When an external contract is present, the planner's contract is
+    # authoritative — skip the contract loop and proceed to coder regardless.
+    if external_contract:
+        compatible = True
+        critique = []
 
     # Merge skeleton into the existing manifest (tests are preserved).
     new_manifest = {**manifest, **files}

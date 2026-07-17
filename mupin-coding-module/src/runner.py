@@ -105,12 +105,16 @@ async def run_swarm_task(
     is_cancelled=None,
     deadline: float | None = None,
     contract_code: str = "",
+    external_contract: dict | None = None,
     deps_cache_tag: str | None = None,
 ) -> Dict[str, Any]:
     """Run the full coding pipeline and return a serializable result payload.
 
     progress_callback: async callable receiving progress dicts between nodes.
     is_cancelled:      async callable returning True if the task was cancelled.
+    external_contract: optional dict from the planner with source_file,
+                       test_file, and exports. When present, the skeleton_maker
+                       uses these instead of guessing.
     """
     os.makedirs(workspace_dir, exist_ok=True)
 
@@ -126,6 +130,7 @@ async def run_swarm_task(
         "profile_name": profile_name,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "contract_code": contract_code,
+        "external_contract": external_contract,
         "deps_cache_tag": deps_cache_tag,
         "file_manifest": {},
         "sandbox_errors": "",
