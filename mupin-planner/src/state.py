@@ -22,6 +22,8 @@ class TaskStep(TypedDict):
     job_id: str          # backbone job id once dispatched
     error: str           # error message if failed
     result: Dict[str, Any]  # job result from backbone
+    exports: List[str]   # what this step makes available to other steps
+                          # e.g., ["function:hash_password", "function:verify_password", "class:User"]
 
 
 class PlannerState(TypedDict):

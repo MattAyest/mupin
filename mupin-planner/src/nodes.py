@@ -371,6 +371,13 @@ Decomposition rules:
   built — adding a feature to an existing module, fixing a bug, refactoring.
   Never use editing to incrementally build up code that should have been
   a single coding job.
+- Each step MUST declare its "exports" — the function names, class names,
+  and constants it makes available to other steps. This is the contract
+  that lets subsequent steps reference the correct symbols. Use the format:
+  "function:name", "class:Name", "constant:NAME".
+- When a later step depends on an earlier step, its prompt/instruction
+  should reference the exported names so the coding/editing module knows
+  what to import and use.
 - Each coding step's prompt MUST specify src/main.py as the target file and
   tests/test_main.py as the test file.
 - Steps can depend on previous steps (depends_on). Keep it linear for now.
@@ -417,6 +424,7 @@ Output format:
         "id": "step_1",
         "module": "coding",
         "prompt": "Write a Python module with...",
+        "exports": ["function:hash_password", "function:verify_password", "class:User"],
         "depends_on": []
       }},
       {{
@@ -424,6 +432,7 @@ Output format:
         "module": "editing",
         "instruction": "Add rate limiting to the API",
         "source_from": "step_1",
+        "exports": ["function:rate_limit_middleware"],
         "depends_on": ["step_1"]
       }}
     ]
@@ -461,6 +470,7 @@ Output format:
             "job_id": "",
             "error": "",
             "result": {},
+            "exports": s.get("exports", []),
         })
 
     return {
