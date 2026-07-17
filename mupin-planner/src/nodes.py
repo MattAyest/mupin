@@ -361,27 +361,49 @@ Available modules:
 {registry}
 
 Decomposition rules:
-- Break the project into SMALL, focused steps. Each coding step should create
-  ONE self-contained, testable module — a single function or a small group of
-  closely related functions. Do NOT submit the entire project as one coding job.
-- A step that takes more than ~100 lines of code is too large — split it.
-- Start with the foundational pieces (data models, core logic) before building
-  on top of them.
-- Use coding steps to create new modules from scratch.
-- Use editing steps to modify or extend existing modules (add features, refactor,
-  fix bugs). An editing step references a previous step's output via source_from.
-- Steps can depend on previous steps (depends_on). Keep the dependency chain linear
-  for now — no parallel branches.
+- Use CODING steps to create complete, self-contained modules from scratch.
+  A coding step should produce a working, tested module — not a fragment.
+- The coding module is capable of handling complex, multi-function prompts.
+  Do NOT over-decompose. A REST API with auth is ONE coding job, not six.
+- Only split into multiple coding steps when the components are genuinely
+  independent and could be developed by separate engineers in parallel.
+- Use EDITING steps only to modify or fix EXISTING code after it has been
+  built — adding a feature to an existing module, fixing a bug, refactoring.
+  Never use editing to incrementally build up code that should have been
+  a single coding job.
 - Each coding step's prompt MUST specify src/main.py as the target file and
-  tests/test_main.py as the test file, because the coding module's sandbox
-  expects this layout.
-- Do not include setup, CI/CD, or deployment steps — focus on the code itself.
+  tests/test_main.py as the test file.
+- Steps can depend on previous steps (depends_on). Keep it linear for now.
+- Do not include setup, CI/CD, or deployment steps.
 
-Example decomposition for "Build a REST API with auth":
-  step_1: coding — "Write a Python module with a function hash_password(password: str) -> str and verify_password(password: str, hashed: str) -> bool using bcrypt. Target: src/main.py, tests in tests/test_main.py."
-  step_2: coding — "Write a Python module with a function create_token(user_id: str) -> str and decode_token(token: str) -> dict that creates and validates JWT tokens. Target: src/main.py, tests in tests/test_main.py."
-  step_3: coding — "Write a Python module with a FastAPI app that has POST /login and GET /protected endpoints, using the auth functions. Target: src/main.py, tests in tests/test_main.py."
-  step_4: editing — "Add rate limiting middleware to the FastAPI app" (source_from: step_3)
+When to use ONE coding step:
+- A single API, library, or service → one coding job
+- A module with multiple related functions → one coding job
+- "Build a REST API with auth and rate limiting" → one coding job
+
+When to use MULTIPLE coding steps:
+- A system with genuinely independent subsystems (e.g., a data pipeline +
+  a web frontend + a CLI tool) → one coding step per subsystem
+- A large project where components are developed independently and
+  integrated later → one coding step per component
+
+When to use EDITING steps:
+- "Fix the failing tests in the API" → editing (source_from: the coding step)
+- "Add rate limiting to the existing API" → editing (source_from: the coding step)
+- "Refactor the auth module to use OAuth" → editing (source_from: the coding step)
+
+Example decomposition for "Build a REST API with auth and rate limiting":
+  step_1: coding — "Write a complete FastAPI application with JWT authentication,
+    user registration, login, a protected /profile endpoint, and rate limiting
+    middleware. Target: src/main.py, tests in tests/test_main.py."
+  (ONE step — this is a single coherent module, not six incremental edits.)
+
+Example decomposition for "Build a data pipeline with a web dashboard":
+  step_1: coding — "Write a data pipeline module that reads CSV files, transforms
+    data, and writes to a database. Target: src/main.py, tests in tests/test_main.py."
+  step_2: coding — "Write a FastAPI web dashboard that queries the database and
+    displays results. Target: src/main.py, tests in tests/test_main.py."
+  (TWO steps — these are genuinely independent subsystems.)
 
 Output format:
   <plan>
